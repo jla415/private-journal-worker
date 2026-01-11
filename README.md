@@ -34,7 +34,14 @@ wrangler secret put JOURNAL_TOKEN
 wrangler deploy
 ```
 
-### 2. Configure Claude Code CLI
+### 2. Configure Claude.ai Web
+
+1. Go to [Claude.ai Settings → Connectors](https://claude.ai/settings/connectors)
+2. Click "Add custom connector"
+3. Enter your worker URL: `https://private-journal.YOUR-SUBDOMAIN.workers.dev`
+4. Complete the OAuth flow (auto-approved, no login needed)
+
+### 3. Configure Claude Code CLI
 
 ```bash
 claude mcp add --transport http \
@@ -42,7 +49,7 @@ claude mcp add --transport http \
   private-journal https://private-journal.YOUR-SUBDOMAIN.workers.dev/mcp
 ```
 
-### 3. Import Existing Journals
+### 4. Import Existing Journals
 
 ```bash
 # Dry run to see what would be imported
