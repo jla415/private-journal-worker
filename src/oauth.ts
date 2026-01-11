@@ -32,6 +32,33 @@ function jsonError(error: string, description: string, status: number): Response
   );
 }
 
+// HTML form for PIN authorization
+function pinFormHTML(queryString: string, error?: string): string {
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <title>Authorize Private Journal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: system-ui; max-width: 400px; margin: 100px auto; padding: 20px; }
+    input { width: 100%; padding: 10px; margin: 10px 0; font-size: 16px; box-sizing: border-box; }
+    button { width: 100%; padding: 12px; background: #000; color: #fff; border: none; cursor: pointer; font-size: 16px; }
+    button:hover { background: #333; }
+    .error { color: #c00; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <h1>Private Journal</h1>
+  <p>Enter PIN to authorize access:</p>
+  ${error ? `<p class="error">${error}</p>` : ''}
+  <form method="POST" action="/authorize${queryString}">
+    <input type="password" name="pin" placeholder="PIN" autofocus required>
+    <button type="submit">Authorize</button>
+  </form>
+</body>
+</html>`;
+}
+
 export function handleOAuthMetadata(request: Request, env: Env): Response {
   const url = new URL(request.url);
   const baseUrl = `${url.protocol}//${url.host}`;
@@ -133,29 +160,52 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
     return jsonError('invalid_request', 'Invalid redirect_uri', 400);
   }
 
-  // Single-user: auto-approve (no login UI needed)
-  // Generate authorization code
-  const code = generateToken(32);
-  const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 minutes
-
-  try {
-    await env.DB.prepare(
-      'INSERT INTO oauth_codes (code, client_id, code_challenge, redirect_uri, scope, expires_at) VALUES (?, ?, ?, ?, ?, ?)'
-    )
-      .bind(code, clientId, codeChallenge, redirectUri, scope, expiresAt)
-      .run();
-  } catch {
-    return jsonError('server_error', 'Failed to generate authorization code', 500);
+  // GET: Show PIN form
+  if (request.method === 'GET') {
+    return new Response(pinFormHTML(url.search), {
+      headers: { 'Content-Type': 'text/html' },
+    });
   }
 
-  // Redirect back with code
-  const redirectUrl = new URL(redirectUri);
-  redirectUrl.searchParams.set('code', code);
-  if (state) {
-    redirectUrl.searchParams.set('state', state);
+  // POST: Validate PIN and authorize
+  if (request.method === 'POST') {
+    const formData = await request.formData();
+    const pinValue = formData.get('pin');
+
+    // Type narrow: formData.get returns string | File | null
+    if (typeof pinValue !== 'string' || pinValue !== env.AUTHORIZE_PIN) {
+      return new Response(pinFormHTML(url.search, 'Invalid PIN'), {
+        status: 403,
+        headers: { 'Content-Type': 'text/html' },
+      });
+    }
+
+    // PIN valid - generate authorization code
+    const code = generateToken(32);
+    const expiresAt = Math.floor(Date.now() / 1000) + 600; // 10 minutes
+
+    try {
+      await env.DB.prepare(
+        'INSERT INTO oauth_codes (code, client_id, code_challenge, redirect_uri, scope, expires_at) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+        .bind(code, clientId, codeChallenge, redirectUri, scope, expiresAt)
+        .run();
+    } catch {
+      return jsonError('server_error', 'Failed to generate authorization code', 500);
+    }
+
+    // Redirect back with code
+    const redirectUrl = new URL(redirectUri);
+    redirectUrl.searchParams.set('code', code);
+    if (state) {
+      redirectUrl.searchParams.set('state', state);
+    }
+
+    return Response.redirect(redirectUrl.toString(), 302);
   }
 
-  return Response.redirect(redirectUrl.toString(), 302);
+  // Other methods not allowed
+  return jsonError('invalid_request', 'Method not allowed', 405);
 }
 
 export async function handleToken(request: Request, env: Env): Promise<Response> {

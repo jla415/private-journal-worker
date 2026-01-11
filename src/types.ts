@@ -6,7 +6,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   AI: Ai;
   JOURNAL_TOKEN: string;
-  REGISTRATION_TOKEN?: string; // Optional: if set, required for /register
+  AUTHORIZE_PIN: string; // Required PIN for OAuth authorization
 }
 
 // D1 row types
