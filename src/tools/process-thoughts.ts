@@ -41,9 +41,8 @@ export async function handleProcessThoughts(
   }
 
   const content = contentParts.join('\n\n');
-  const now = params._timestamp ? Number(params._timestamp) : Date.now();
-  // Use provided date (for import) or derive from timestamp
-  const date = params._date || new Date(now).toISOString().split('T')[0];
+  const now = Date.now();
+  const date = new Date(now).toISOString().split('T')[0];
 
   // Generate unique ID from timestamp + content hash
   const hashBuffer = await crypto.subtle.digest(
@@ -66,7 +65,7 @@ export async function handleProcessThoughts(
     id,
     timestamp: now,
     date,
-    project: params._project || null,
+    project: null,
     sections,
     content,
   });

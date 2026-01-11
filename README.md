@@ -9,7 +9,6 @@ This is a companion to [private-journal-mcp](https://github.com/obra/private-jou
 - **Remote sync**: Journal entries accessible from any machine
 - **Semantic search**: Vector search via Cloudflare Vectorize (bge-m3, 1024-dim)
 - **OAuth 2.1 + PIN**: Secure access for Claude.ai web and Claude Code CLI
-- **Import tool**: Migrate existing local journals
 
 ## Setup
 
@@ -49,22 +48,6 @@ claude mcp add --transport http \
 ```
 
 When first used, Claude Code will open a browser for OAuth authorization. Enter your PIN to complete setup.
-
-### 4. Import Existing Journals
-
-The import script requires OAuth. Run it and authenticate when prompted:
-
-```bash
-# Dry run to see what would be imported
-npx ts-node scripts/import-local.ts --dry-run
-
-# Import from ~/.claude-journals/
-npx ts-node scripts/import-local.ts
-
-# Import project-specific journal
-npx ts-node scripts/import-local.ts \
-  /path/to/project/.private-journal --project myproject
-```
 
 ## MCP Tools
 

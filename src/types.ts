@@ -50,9 +50,6 @@ export interface ProcessThoughtsParams {
   user_context?: string;
   technical_insights?: string;
   world_knowledge?: string;
-  _timestamp?: number; // Optional: preserve original timestamp during import
-  _date?: string; // Optional: preserve original date (YYYY-MM-DD) during import
-  _project?: string; // Optional: project name for import
 }
 
 export interface SearchParams {
