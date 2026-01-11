@@ -6,6 +6,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   AI: Ai;
   JOURNAL_TOKEN: string;
+  REGISTRATION_TOKEN?: string; // Optional: if set, required for /register
 }
 
 // D1 row types

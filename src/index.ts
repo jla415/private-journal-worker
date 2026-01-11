@@ -51,7 +51,14 @@ export default {
         return handleToken(request, env);
       }
       if (path === '/register') {
-        // DCR endpoint - unauthenticated per RFC 7591 (Claude.ai requires this)
+        // DCR endpoint - requires REGISTRATION_TOKEN if set, otherwise open
+        if (env.REGISTRATION_TOKEN) {
+          const authHeader = request.headers.get('Authorization');
+          const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+          if (token !== env.REGISTRATION_TOKEN) {
+            return jsonError('Unauthorized', 401);
+          }
+        }
         return handleRegister(request, env);
       }
 
