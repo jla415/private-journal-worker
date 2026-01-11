@@ -38,11 +38,12 @@ export async function handleSearch(
   // Filter by sections if specified
   let filteredMatches = vectorResults.matches;
   if (params.sections && params.sections.length > 0) {
+    const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, '_');
     filteredMatches = vectorResults.matches.filter((match) => {
       const metadata = match.metadata as { sections?: string } | undefined;
       if (!metadata || !metadata.sections) return false;
-      const entrySections = metadata.sections.split(',');
-      return params.sections!.some((s) => entrySections.includes(s));
+      const entrySections = metadata.sections.split(',').map(normalize);
+      return params.sections!.some((s) => entrySections.includes(normalize(s)));
     });
   }
 
