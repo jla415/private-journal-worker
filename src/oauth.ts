@@ -178,8 +178,19 @@ export async function handleToken(request: Request, env: Env): Promise<Response>
   }
 
   const grantType = body['grant_type'];
-  const clientId = body['client_id'];
-  const clientSecret = body['client_secret'];
+
+  // Support both client_secret_post (in body) and client_secret_basic (in header)
+  let clientId = body['client_id'];
+  let clientSecret = body['client_secret'];
+
+  const authHeader = request.headers.get('Authorization');
+  if (authHeader && authHeader.startsWith('Basic ')) {
+    const base64Credentials = authHeader.slice(6);
+    const credentials = atob(base64Credentials);
+    const [headerClientId, headerClientSecret] = credentials.split(':');
+    clientId = clientId || headerClientId;
+    clientSecret = clientSecret || headerClientSecret;
+  }
 
   // Verify client credentials
   let client: OAuthClientRow | null;

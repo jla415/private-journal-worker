@@ -151,7 +151,7 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
   switch (body.method) {
     case 'initialize': {
       response.result = {
-        protocolVersion: '2024-11-05',
+        protocolVersion: '2025-06-18',
         capabilities: {
           tools: {},
         },

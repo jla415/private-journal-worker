@@ -34,6 +34,16 @@ export default {
       if (path === '/.well-known/oauth-authorization-server') {
         return handleOAuthMetadata(request, env);
       }
+      // RFC 8707 - Protected Resource Metadata (points to authorization server)
+      if (path === '/.well-known/oauth-protected-resource') {
+        const baseUrl = `${url.protocol}//${url.host}`;
+        return new Response(JSON.stringify({
+          resource: baseUrl,
+          authorization_servers: [`${baseUrl}/.well-known/oauth-authorization-server`],
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
       if (path === '/authorize') {
         return handleAuthorize(request, env);
       }
@@ -41,16 +51,12 @@ export default {
         return handleToken(request, env);
       }
       if (path === '/register') {
-        // Require bearer token to register new OAuth clients
-        const authResult = await validateAuth(request, env);
-        if (!authResult.valid) {
-          return jsonError('Unauthorized', 401);
-        }
+        // DCR endpoint - unauthenticated per RFC 7591 (Claude.ai requires this)
         return handleRegister(request, env);
       }
 
-      // MCP endpoint (requires auth)
-      if (path === '/mcp' || path.startsWith('/mcp/')) {
+      // MCP endpoint (requires auth) - serve at root and /mcp
+      if (path === '/' || path === '/mcp' || path.startsWith('/mcp/')) {
         const authResult = await validateAuth(request, env);
         if (!authResult.valid) {
           return jsonError('Unauthorized', 401);
