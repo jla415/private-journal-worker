@@ -8,8 +8,7 @@ This is a companion to [private-journal-mcp](https://github.com/obra/private-jou
 
 - **Remote sync**: Journal entries accessible from any machine
 - **Semantic search**: Vector search via Cloudflare Vectorize (bge-m3, 1024-dim)
-- **OAuth 2.1**: For Claude.ai web integration
-- **Bearer token**: For Claude Code CLI access
+- **OAuth 2.1 + PIN**: Secure access for Claude.ai web and Claude Code CLI
 - **Import tool**: Migrate existing local journals
 
 ## Setup
@@ -27,8 +26,8 @@ wrangler vectorize create private-journal --dimensions=1024 --metric=cosine
 
 # Update wrangler.toml with your database/vectorize IDs
 
-# Set bearer token secret
-wrangler secret put JOURNAL_TOKEN
+# Set authorization PIN
+wrangler secret put AUTHORIZE_PIN
 
 # Deploy
 wrangler deploy
@@ -39,32 +38,32 @@ wrangler deploy
 1. Go to [Claude.ai Settings → Connectors](https://claude.ai/settings/connectors)
 2. Click "Add custom connector"
 3. Enter your worker URL: `https://private-journal.YOUR-SUBDOMAIN.workers.dev`
-4. Complete the OAuth flow (auto-approved, no login needed)
+4. Enter your PIN when prompted
+5. Connection complete
 
 ### 3. Configure Claude Code CLI
 
 ```bash
 claude mcp add --transport http \
-  --header "Authorization: Bearer $JOURNAL_TOKEN" \
   private-journal https://private-journal.YOUR-SUBDOMAIN.workers.dev/mcp
 ```
 
+When first used, Claude Code will open a browser for OAuth authorization. Enter your PIN to complete setup.
+
 ### 4. Import Existing Journals
+
+The import script requires OAuth. Run it and authenticate when prompted:
 
 ```bash
 # Dry run to see what would be imported
 npx ts-node scripts/import-local.ts --dry-run
 
 # Import from ~/.claude-journals/
-JOURNAL_TOKEN=your-token npx ts-node scripts/import-local.ts
+npx ts-node scripts/import-local.ts
 
 # Import project-specific journal
-JOURNAL_TOKEN=your-token npx ts-node scripts/import-local.ts \
+npx ts-node scripts/import-local.ts \
   /path/to/project/.private-journal --project myproject
-
-# Skip central journals, only import specified directories
-JOURNAL_TOKEN=your-token npx ts-node scripts/import-local.ts \
-  --skip-central /path/to/.private-journal --project projectname
 ```
 
 ## MCP Tools
@@ -75,14 +74,6 @@ Same tools as private-journal-mcp:
 - **search_journal** - Semantic search with optional section/project filters
 - **read_journal_entry** - Read full entry by ID
 - **list_recent_entries** - Browse recent entries
-
-## Admin Endpoints
-
-```bash
-# Clear all entries (requires auth)
-curl -X POST -H "Authorization: Bearer $JOURNAL_TOKEN" \
-  https://private-journal.YOUR-SUBDOMAIN.workers.dev/admin/clear
-```
 
 ## Architecture
 
