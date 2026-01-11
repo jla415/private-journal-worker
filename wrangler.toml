@@ -1,0 +1,24 @@
+# ABOUTME: Cloudflare Worker configuration for private journal MCP server
+# ABOUTME: Defines bindings for D1, Vectorize, and Workers AI
+
+name = "private-journal"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[vars]
+# Set JOURNAL_TOKEN via `wrangler secret put JOURNAL_TOKEN`
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "private-journal"
+database_id = "e2a58fc6-90f1-4c18-bc65-20efe8ced76d"
+
+# Vectorize index binding
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "private-journal"
+
+# Workers AI binding
+[ai]
+binding = "AI"
