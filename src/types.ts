@@ -5,6 +5,7 @@ export interface Env {
   DB: D1Database;
   VECTORIZE: VectorizeIndex;
   AI: Ai;
+  JOURNAL_TOKEN: string;
   AUTHORIZE_PIN: string; // Required PIN for OAuth authorization
 }
 

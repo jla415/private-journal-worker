@@ -1,5 +1,5 @@
-// ABOUTME: Authentication middleware for OAuth token validation
-// ABOUTME: Validates OAuth access tokens stored in D1
+// ABOUTME: Authentication middleware for Bearer token and OAuth validation
+// ABOUTME: Checks both static JOURNAL_TOKEN and OAuth tokens in D1
 
 import { Env, OAuthTokenRow } from './types';
 
@@ -16,6 +16,11 @@ export async function validateAuth(request: Request, env: Env): Promise<AuthResu
   }
 
   const token = authHeader.slice(7);
+
+  // Check static bearer token (for CLI)
+  if (env.JOURNAL_TOKEN && token === env.JOURNAL_TOKEN) {
+    return { valid: true, scope: 'journal:read journal:write' };
+  }
 
   // Check OAuth token in D1
   const now = Math.floor(Date.now() / 1000);

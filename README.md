@@ -8,7 +8,7 @@ This is a companion to [private-journal-mcp](https://github.com/obra/private-jou
 
 - **Remote sync**: Journal entries accessible from any machine
 - **Semantic search**: Vector search via Cloudflare Vectorize (bge-m3, 1024-dim)
-- **OAuth 2.1 + PIN**: Secure access for Claude.ai web and Claude Code CLI
+- **Flexible auth**: Bearer token for CLI, OAuth 2.1 + PIN for Claude.ai web
 
 ## Setup
 
@@ -41,6 +41,20 @@ wrangler deploy
 5. Connection complete
 
 ### 3. Configure Claude Code CLI
+
+**Option A: Bearer Token (recommended for CLI)**
+
+```bash
+# Set the secret on your worker
+wrangler secret put JOURNAL_TOKEN
+
+# Add MCP with bearer auth
+claude mcp add --transport http \
+  private-journal https://private-journal.YOUR-SUBDOMAIN.workers.dev/mcp \
+  --header "Authorization: Bearer YOUR_TOKEN"
+```
+
+**Option B: OAuth Flow**
 
 ```bash
 claude mcp add --transport http \
