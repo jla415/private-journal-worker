@@ -65,7 +65,7 @@ export async function handleProcessThoughts(
     id,
     timestamp: now,
     date,
-    project: null,
+    project: params.project ?? null,
     sections,
     content,
   });

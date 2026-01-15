@@ -50,6 +50,10 @@ const TOOLS = {
           type: 'string',
           description: 'Your PRIVATE LEARNING JOURNAL for everything else interesting or useful.',
         },
+        project: {
+          type: 'string',
+          description: 'Project name (typically basename of working directory)',
+        },
       },
       required: [],
     },

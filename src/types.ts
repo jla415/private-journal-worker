@@ -51,6 +51,7 @@ export interface ProcessThoughtsParams {
   user_context?: string;
   technical_insights?: string;
   world_knowledge?: string;
+  project?: string;
 }
 
 export interface SearchParams {
