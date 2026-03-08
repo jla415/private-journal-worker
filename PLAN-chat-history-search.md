@@ -470,3 +470,275 @@ Each phase is independently deployable. Phase 1 can ship without Phase 2/3. Phas
 2. **FTS5 on D1** — Confirm D1 supports FTS5 virtual tables. If not, fall back to `LIKE` queries with appropriate indexing (less ideal but functional).
 3. **Exchange size limits** — Claude conversations can be very long. Should we truncate `user_message` / `assistant_message` in the DB, or store full content? Embedding input is already bounded by the model's context window. Consider storing full content but truncating embedding input to ~2000 chars (matching episodic-memory's approach).
 4. **Worker CPU limits** — Batch ingestion of many exchanges may hit the 30s CPU limit. The bulk import endpoint should process in small batches and potentially use a queue for very large imports.
+
+---
+
+## Phase 4: CLI Tool & Claude Code Skill (Alternative to MCP)
+
+Skills use less context than MCP in Claude Code — MCP tool definitions load into the context window on every message, while skill descriptions are budgeted to ~2% of context and only expand fully when invoked. For a personal tool used occasionally during a session, a skill is much more efficient.
+
+### 4.1 CLI Tool: `journal`
+
+A standalone CLI that talks directly to the worker's HTTP API. Can be used from the terminal, from Claude Code skills, or from hooks.
+
+**New directory:** `cli/`
+
+```
+cli/
+  src/
+    index.ts        # Entry point, command router
+    commands/
+      search.ts     # Semantic search
+      read.ts       # Read full entry
+      recent.ts     # List recent entries
+      write.ts      # Create journal entry
+      sync.ts       # Sync chat history (absorbs Phase 3 sync client)
+      stats.ts      # Show stats
+    client.ts       # HTTP client wrapper (auth, retries, base URL)
+    config.ts       # Config resolution
+    output.ts       # Formatting (table, json, markdown)
+  package.json
+  tsconfig.json
+```
+
+**Commands:**
+
+```bash
+# Search
+journal search "authentication patterns"
+journal search "debugging tips" --limit 5 --mode hybrid
+journal search "auth" --after 2025-01-01 --before 2025-06-01
+journal search "auth" --source chat    # only chat history
+journal search "auth" --project myapp
+
+# Read
+journal read <entry-id>
+journal read <entry-id> --json         # machine-readable output
+
+# Recent
+journal recent
+journal recent --days 7 --project myapp
+
+# Write (multi-section)
+journal write --feelings "frustrated with auth" --project-notes "OAuth PKCE flow working"
+journal write --stdin                   # read content from stdin (piped input)
+
+# Sync chat history
+journal sync                            # incremental sync
+journal sync --full                     # re-sync everything
+journal sync --project myapp            # sync single project
+journal sync --dry-run                  # preview what would sync
+
+# Stats
+journal stats
+journal stats --json
+```
+
+**Config resolution** (same as Phase 3.7, shared):
+1. CLI flags
+2. Environment variables: `JOURNAL_WORKER_URL`, `JOURNAL_TOKEN`
+3. Config file: `~/.config/private-journal/config.json`
+
+**Setup command:**
+```bash
+journal config set --url https://private-journal.you.workers.dev --token <token>
+```
+
+**Output formats:**
+- Default: human-readable (colored, truncated excerpts, relative dates)
+- `--json`: machine-readable JSON (for piping to other tools or skills)
+- `--markdown`: markdown-formatted (useful when Claude reads the output)
+
+**Package & distribution:**
+- Published as `private-journal-cli` (or scoped `@jla415/journal-cli`)
+- Installable via `npm install -g` or usable via `npx`
+- Zero heavy dependencies — uses native `fetch`, `readline`, `crypto`
+- Single `bin` entry: `"journal": "./dist/index.js"`
+
+### 4.2 Claude Code Skill: `journal`
+
+A skill that wraps the CLI, giving Claude natural-language access to the journal without MCP overhead.
+
+**Directory:** `.claude/skills/journal/`
+
+**File: `.claude/skills/journal/SKILL.md`**
+
+```yaml
+---
+name: journal
+description: Search and manage your private journal. Use when you need to recall past thoughts, find technical insights, search chat history, or record new observations.
+allowed-tools: Bash(journal *)
+user-invocable: true
+argument-hint: [search query or command]
+---
+
+# Private Journal
+
+You have access to a private journal via the `journal` CLI tool. Use it to search past entries, read full content, or write new thoughts.
+
+## Available Commands
+
+### Search (most common)
+\`\`\`bash
+journal search "your query" --json
+journal search "your query" --limit 5 --json
+journal search "your query" --source chat --json     # search only chat history
+journal search "your query" --source journal --json  # search only journal entries
+journal search "your query" --mode text --json       # keyword search (not semantic)
+journal search "your query" --after 2025-01-01 --json
+\`\`\`
+
+### Read full entry
+\`\`\`bash
+journal read <entry-id> --json
+\`\`\`
+
+### Recent entries
+\`\`\`bash
+journal recent --days 7 --json
+\`\`\`
+
+### Write new entry
+\`\`\`bash
+journal write --feelings "content" --project-notes "content" --technical-insights "content"
+\`\`\`
+
+## Usage Guidelines
+
+- Always use `--json` flag so you can parse the structured output
+- When the user asks you to "remember" or "note" something, use `journal write`
+- When the user asks "have I seen this before" or "what did I think about X", use `journal search`
+- Present search results as a concise summary, not raw JSON
+- If a search returns relevant results, offer to read the full entry
+- Limit searches to 5 results unless the user asks for more
+```
+
+**Why this works well:**
+
+| Aspect | MCP Approach | Skill + CLI Approach |
+|--------|-------------|---------------------|
+| Context cost | ~4 tool definitions loaded every message (~500+ tokens) | ~50 token description; full skill loads only on `/journal` invocation |
+| Auth | Configured in MCP server settings | CLI reads from `~/.config/` — no Claude Code config needed |
+| Latency | JSON-RPC round-trip per tool call | Single `bash` command, direct HTTP to worker |
+| Discoverability | Tools always visible in tool list | Shows as `/journal` slash command |
+| Flexibility | Rigid tool schemas | Natural language — Claude decides which CLI flags to use |
+| Offline use | Requires MCP server running | CLI works standalone from terminal too |
+
+### 4.3 Claude Code Skill: `journal-reflect`
+
+A higher-level skill for end-of-session reflection. Invoked manually or via hook.
+
+**File: `.claude/skills/journal-reflect/SKILL.md`**
+
+```yaml
+---
+name: journal-reflect
+description: End-of-session reflection — summarize what was accomplished and save insights to the journal.
+allowed-tools: Bash(journal *)
+user-invocable: true
+---
+
+# Session Reflection
+
+Review what happened in this session and save key insights to the journal.
+
+## Steps
+
+1. Summarize the main tasks accomplished in this session
+2. Identify any technical insights worth preserving
+3. Note any decisions made and their rationale
+4. Record observations about the user's working patterns or preferences
+5. Save to journal using appropriate sections:
+
+\`\`\`bash
+journal write \
+  --project-notes "what was built/changed" \
+  --technical-insights "what was learned" \
+  --user-context "preferences or patterns noticed"
+\`\`\`
+
+Keep entries concise. Focus on insights that would be valuable to recall later, not a play-by-play of the session.
+```
+
+### 4.4 Claude Code Skill: `journal-sync`
+
+Dedicated skill for syncing chat history.
+
+**File: `.claude/skills/journal-sync/SKILL.md`**
+
+```yaml
+---
+name: journal-sync
+description: Sync Claude Code chat history to the journal for searchable recall.
+allowed-tools: Bash(journal sync *)
+user-invocable: true
+argument-hint: [--full | --project name | --dry-run]
+---
+
+# Journal Sync
+
+Sync your Claude Code conversation history to the journal worker.
+
+\`\`\`bash
+journal sync $ARGUMENTS
+\`\`\`
+
+If no arguments provided, run incremental sync (only new/changed conversations).
+
+Report the results to the user: how many exchanges were synced, from how many sessions.
+```
+
+### 4.5 SessionStart Hook (Optional Auto-Sync)
+
+**File: `.claude/hooks.json`** (or project-level `.claude/settings.json`)
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "journal sync --quiet 2>/dev/null &",
+        "timeout": 5000
+      }
+    ]
+  }
+}
+```
+
+Background sync on session start — fires and forgets. Keeps the vector DB current without manual `/journal-sync` invocation.
+
+### 4.6 Implementation Order
+
+1. **CLI client** (`cli/src/client.ts`, `cli/src/config.ts`) — HTTP client + config
+2. **CLI search command** — most immediately useful
+3. **CLI read/recent/write commands** — round out the CLI
+4. **Skill: journal** — wrap CLI for Claude Code
+5. **CLI sync command** — absorb Phase 3 sync client into CLI
+6. **Skill: journal-sync** — wrap sync for Claude Code
+7. **Skill: journal-reflect** — higher-level workflow
+8. **Hook: auto-sync** — optional automation
+
+### 4.7 Migration Path: MCP → Skill
+
+For users currently using the MCP server:
+
+1. Install CLI: `npm install -g private-journal-cli`
+2. Configure: `journal config set --url <url> --token <token>`
+3. Add skill files to `.claude/skills/journal/`
+4. Remove MCP server from Claude Code settings
+5. Use `/journal search ...` instead of relying on auto-invoked MCP tools
+
+The worker API is unchanged — both MCP and CLI/skill talk to the same endpoints. Users can run both simultaneously during migration.
+
+### 4.8 Cost & Context Comparison
+
+**MCP (current):**
+- 4 tool definitions × ~150 tokens each = **~600 tokens per message** in context
+- Over a 50-message session = **~30,000 tokens** of context spent on tool definitions
+- Tools always visible even when not journal-related
+
+**Skill (proposed):**
+- Skill description in discovery list: **~50 tokens per message**
+- Full skill loads only on invocation: **~400 tokens once**
+- Over a 50-message session with 3 journal lookups = **~3,700 tokens total**
+- **~8x less context usage** for typical sessions
