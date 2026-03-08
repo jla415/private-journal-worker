@@ -190,20 +190,204 @@ Modify `search_journal` (or add a new `search_all` tool) to search across both j
 
 ---
 
-## Phase 3: Bulk Import Endpoint
+## Phase 3: Push Sync Client
 
-### 3.1 Bulk Import Route
+A standalone script that runs on the user's machine, reads Claude Code conversation files, parses them into exchanges, and pushes them to the worker. Ships as part of this repo (e.g. `sync/` directory) and runs via `npx` or as a Claude Code hook.
+
+### 3.1 JSONL Parser
+
+**New file:** `sync/parse.ts`
+
+Parses Claude Code `.jsonl` conversation files into exchanges:
+
+- **Input:** Path to a `.jsonl` file + project name
+- **Output:** Array of parsed exchanges
+
+```typescript
+interface ParsedExchange {
+  user_message: string;
+  assistant_message: string;
+  tool_names: string[];
+  timestamp: number;
+  session_id: string;
+  project: string;
+  exchange_hash: string;  // deterministic ID for dedup
+}
+```
+
+**Parsing logic** (mirrors episodic-memory's approach):
+1. Stream JSONL line-by-line
+2. Only process lines where `type === "user"` or `type === "assistant"`
+3. Extract text from `message.content`:
+   - If `string`, use directly
+   - If `Array`, join all `type: "text"` blocks; collect `type: "tool_use"` names
+   - Skip `tool_result` content entirely (bulky, noisy)
+4. Group into exchanges: one user message + all subsequent assistant messages until the next user message
+5. Generate deterministic hash from `project + session_id + user_message_prefix + timestamp` for dedup
+
+**What gets included vs excluded:**
+
+| Included | Excluded |
+|----------|----------|
+| User text messages | Tool inputs (file contents, command args) |
+| Assistant text responses | Tool outputs (file reads, command results) |
+| Tool names used (Read, Edit, Bash...) | `tool_result` blocks |
+| Timestamps, session ID, project | Binary/image content |
+| | Sidechain messages (`isSidechain: true`) |
+
+### 3.2 Sync State Tracker
+
+**New file:** `sync/state.ts`
+
+Tracks which files/sessions have already been synced to avoid re-uploading:
+
+- **State file location:** `~/.config/private-journal/sync-state.json`
+- **State structure:**
+  ```typescript
+  interface SyncState {
+    worker_url: string;
+    files: {
+      [filePath: string]: {
+        mtime: number;       // last modified time when synced
+        size: number;         // file size when synced
+        last_synced: number;  // when we last pushed
+        exchange_count: number;
+      }
+    }
+  }
+  ```
+- On each sync run:
+  1. Load state file
+  2. For each `.jsonl` file, compare current `mtime`/`size` to stored values
+  3. Skip files that haven't changed
+  4. After successful push, update state entry
+- First run syncs everything; subsequent runs are incremental
+
+### 3.3 Push Client
+
+**New file:** `sync/push.ts`
+
+Pushes parsed exchanges to the worker:
+
+- **Auth:** Bearer token from env var `JOURNAL_TOKEN` or `~/.config/private-journal/config.json`
+- **Endpoint:** `POST /admin/import-conversations` on the worker
+- **Batching:** Send exchanges in batches of 20 per request (keeps payload under ~100KB and avoids Worker CPU limits)
+- **Dedup:** Send `exchange_hash` with each exchange; worker skips if already exists (INSERT OR IGNORE)
+- **Error handling:** Log failed batches, continue with remaining; retry transient failures (5xx) up to 3 times with backoff
+- **Response:** Collect `{ imported, skipped }` counts from each batch, report totals
+
+```typescript
+async function pushExchanges(
+  exchanges: ParsedExchange[],
+  workerUrl: string,
+  token: string
+): Promise<{ imported: number; skipped: number; errors: number }>
+```
+
+### 3.4 CLI Entry Point
+
+**New file:** `sync/cli.ts`
+
+Standalone CLI that orchestrates discover → parse → push:
+
+```
+npx private-journal-sync [options]
+
+Options:
+  --worker-url <url>    Worker URL (or JOURNAL_WORKER_URL env var)
+  --token <token>       Bearer token (or JOURNAL_TOKEN env var)
+  --project <name>      Sync only this project (default: all)
+  --full                Ignore sync state, re-sync everything
+  --dry-run             Parse and report what would be synced, don't push
+```
+
+**Pipeline:**
+1. **Discover:** Walk `~/.claude/projects/` to find all `<project>/<session>.jsonl` files
+2. **Filter:** Check sync state, skip unchanged files
+3. **Parse:** For each changed file, run the JSONL parser to extract exchanges
+4. **Push:** Batch and push exchanges to the worker
+5. **Update state:** Record synced files in state file
+6. **Report:** Print summary (`Synced 47 exchanges from 3 sessions, skipped 12 unchanged files`)
+
+### 3.5 Claude Code Hook (Optional)
+
+**New file:** `sync/hooks.json`
+
+Auto-sync on session end via a Claude Code hook:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "stop",
+        "command": "npx private-journal-sync --quiet"
+      }
+    ]
+  }
+}
+```
+
+Alternatively, as a **SessionStart** hook (sync previous sessions when a new one begins):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "command": "npx private-journal-sync --quiet --background"
+      }
+    ]
+  }
+}
+```
+
+The `--quiet` flag suppresses output except errors. The `--background` flag (SessionStart variant) forks the sync process so it doesn't block session startup.
+
+### 3.6 Worker-Side Import Endpoint
 
 **File:** `src/index.ts`
 
 Add `POST /admin/import-conversations` (auth required):
 
-- Accepts a JSON body with an array of parsed exchanges (same shape as the tool)
-- Useful for batch importing large conversation archives without MCP overhead
-- Processes in batches of 10-20 to stay within Workers CPU limits
+- Accepts JSON body:
+  ```typescript
+  {
+    exchanges: Array<{
+      user_message: string;
+      assistant_message: string;
+      tool_names?: string[];
+      session_id?: string;
+      project?: string;
+      timestamp?: number;
+      exchange_hash: string;  // for dedup
+    }>
+  }
+  ```
+- For each exchange:
+  - Skip if `exchange_hash` already exists (SELECT before INSERT)
+  - Generate embedding via Workers AI
+  - Insert into `exchanges` + `exchanges_fts` + Vectorize
+- Process in batches of 5-10 (embedding is the bottleneck)
 - Returns `{ imported: N, skipped: N, errors: [...] }`
 
-### 3.2 Conversation Stats Tool
+### 3.7 Configuration
+
+**New file:** `sync/config.ts`
+
+Config resolution (first found wins):
+
+1. CLI flags (`--worker-url`, `--token`)
+2. Environment variables (`JOURNAL_WORKER_URL`, `JOURNAL_TOKEN`)
+3. Config file at `~/.config/private-journal/config.json`:
+   ```json
+   {
+     "worker_url": "https://private-journal.you.workers.dev",
+     "token": "your-bearer-token"
+   }
+   ```
+
+### 3.8 Conversation Stats Tool
 
 **New file:** `src/tools/stats.ts`
 
@@ -213,10 +397,28 @@ New MCP tool `journal_stats`:
 
 ---
 
+## Sync Package Structure
+
+```
+sync/
+  cli.ts          # Entry point: discover → parse → push → report
+  parse.ts        # JSONL parser: .jsonl → ParsedExchange[]
+  push.ts         # HTTP client: batch push to worker
+  state.ts        # Incremental sync state (~/.config/private-journal/sync-state.json)
+  config.ts       # Config resolution (CLI > env > file)
+  hooks.json      # Optional Claude Code hook for auto-sync
+  package.json    # Standalone package, deps: only node built-ins + fetch
+```
+
+Minimal dependencies: uses Node built-ins (`fs`, `readline`, `path`, `crypto`) plus native `fetch`. No framework needed.
+
+---
+
 ## File Change Summary
 
 | File | Change |
 |------|--------|
+| **Worker** | |
 | `schema.sql` | Add `entries_fts`, `exchanges`, `exchanges_fts` tables + indexes |
 | `src/types.ts` | Add `ExchangeRow`, update `SearchParams` (mode, after, before, source), update `SearchResult` |
 | `src/db.ts` | Add FTS insert/search, exchange CRUD, exchange FTS |
@@ -225,8 +427,16 @@ New MCP tool `journal_stats`:
 | `src/tools/ingest-exchanges.ts` | **New** — ingest chat exchanges tool |
 | `src/tools/stats.ts` | **New** — journal stats tool |
 | `src/mcp.ts` | Register new tools, update search schema |
-| `src/index.ts` | Add bulk import route |
+| `src/index.ts` | Add import endpoint |
 | `src/tools/process-thoughts.ts` | Add FTS insert on write |
+| **Sync client** | |
+| `sync/cli.ts` | **New** — CLI entry point |
+| `sync/parse.ts` | **New** — JSONL conversation parser |
+| `sync/push.ts` | **New** — HTTP push client |
+| `sync/state.ts` | **New** — incremental sync state tracker |
+| `sync/config.ts` | **New** — config resolution |
+| `sync/hooks.json` | **New** — optional Claude Code hook |
+| `sync/package.json` | **New** — standalone package |
 
 ## Implementation Order
 
@@ -234,11 +444,13 @@ New MCP tool `journal_stats`:
 2. **Phase 1.2** — FTS5 table + insert path
 3. **Phase 1.3** — Hybrid search mode
 4. **Phase 1.4** — Multi-concept search
-5. **Phase 2.1-2.3** — Exchanges table + ingest tool
+5. **Phase 2.1-2.3** — Exchanges table + ingest tool + worker import endpoint
 6. **Phase 2.4** — Unified search across journals + exchanges
-7. **Phase 3** — Bulk import + stats
+7. **Phase 3.1-3.4** — Sync client: parser, state tracker, push client, CLI
+8. **Phase 3.5** — Claude Code hook for auto-sync
+9. **Phase 3.8** — Stats tool
 
-Each phase is independently deployable. Phase 1 can ship without Phase 2/3.
+Each phase is independently deployable. Phase 1 can ship without Phase 2/3. Phase 3 (sync client) requires Phase 2 (exchanges table + import endpoint) on the worker side.
 
 ## Key Differences from episodic-memory
 
