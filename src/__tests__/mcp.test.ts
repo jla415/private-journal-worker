@@ -55,18 +55,19 @@ describe('handleMcp', () => {
   });
 
   describe('tools/list', () => {
-    it('should return all 4 tools', async () => {
+    it('should return all 5 tools', async () => {
       const response = await handleMcp(mcpRequest('tools/list'), env);
       const body = await response.json() as any;
 
       const tools = body.result.tools;
-      expect(tools).toHaveLength(4);
+      expect(tools).toHaveLength(5);
 
       const toolNames = tools.map((t: any) => t.name);
       expect(toolNames).toContain('process_thoughts');
       expect(toolNames).toContain('search_journal');
       expect(toolNames).toContain('read_journal_entry');
       expect(toolNames).toContain('list_recent_entries');
+      expect(toolNames).toContain('journal_stats');
     });
 
     it('should include inputSchema for each tool', async () => {
@@ -82,11 +83,10 @@ describe('handleMcp', () => {
 
   describe('tools/call', () => {
     it('should route to search_journal', async () => {
-      // Mock vectorize to return empty results
       const response = await handleMcp(
         mcpRequest('tools/call', {
           name: 'search_journal',
-          arguments: { query: 'test' },
+          arguments: { query: 'test', mode: 'vector' },
         }),
         env
       );
@@ -117,6 +117,26 @@ describe('handleMcp', () => {
       expect(parsed.entries).toBeDefined();
     });
 
+    it('should route to journal_stats', async () => {
+      const stmt = {
+        bind: vi.fn().mockReturnThis(),
+        first: vi.fn().mockResolvedValue({ count: 0 }),
+        all: vi.fn().mockResolvedValue({ results: [] }),
+      };
+      (env.DB.prepare as any).mockReturnValue(stmt);
+
+      const response = await handleMcp(
+        mcpRequest('tools/call', {
+          name: 'journal_stats',
+          arguments: {},
+        }),
+        env
+      );
+      const body = await response.json() as any;
+
+      expect(body.result.content[0].type).toBe('text');
+    });
+
     it('should return error for unknown tool', async () => {
       const response = await handleMcp(
         mcpRequest('tools/call', {
@@ -132,7 +152,6 @@ describe('handleMcp', () => {
     });
 
     it('should return error when tool throws', async () => {
-      // search_journal throws when query is missing
       const response = await handleMcp(
         mcpRequest('tools/call', {
           name: 'search_journal',

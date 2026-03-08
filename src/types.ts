@@ -55,34 +55,50 @@ export interface ProcessThoughtsParams {
 }
 
 export interface SearchParams {
-  query: string;
+  query: string | string[];
   limit?: number;
   sections?: string[];
   project?: string;
+  after?: string;
+  before?: string;
+  mode?: 'vector' | 'text' | 'hybrid';
+  source?: 'journal' | 'chat' | 'all';
 }
 
 export interface ReadEntryParams {
-  path: string;
+  id: string;
 }
 
 export interface ListRecentParams {
   limit?: number;
   days?: number;
   project?: string;
+  source?: 'journal' | 'chat' | 'all';
 }
 
 // Search result type
 export interface SearchResult {
   id: string;
+  path: string; // deprecated alias for id (backward compat, always === id)
   score: number;
   timestamp: number;
   date: string;
-  sections: string[];
+  source: 'journal' | 'chat';
+  sections?: string[];
   excerpt: string;
-  path: string;
+  session_id?: string;
+  project?: string;
 }
 
-// Embedding result from Workers AI
-export interface EmbeddingResult {
-  data: number[][];
+// Exchange row type (D1)
+export interface ExchangeRow {
+  id: string;
+  session_id: string | null;
+  project: string | null;
+  timestamp: number;
+  date: string;
+  user_message: string;
+  assistant_message: string;
+  tool_names: string | null;
+  created_at: number;
 }

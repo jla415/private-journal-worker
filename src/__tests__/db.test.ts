@@ -1,10 +1,10 @@
 // ABOUTME: Tests for D1 database operations
-// ABOUTME: Covers insert, get, list, and search result conversion
+// ABOUTME: Covers insert, get, list, search result conversion, and exchange operations
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { insertEntry, getEntry, getEntriesByIds, listRecentEntries, rowToSearchResult } from '../db';
+import { insertEntry, getEntry, getEntriesByIds, listRecentEntries, rowToSearchResult, exchangeToSearchResult, insertEntryFts, getExchangesByIds } from '../db';
 import { createMockEnv, createMockEntryRow } from './mocks';
-import { Env, EntryRow } from '../types';
+import { Env, EntryRow, ExchangeRow } from '../types';
 
 describe('db', () => {
   let env: Env;
@@ -29,7 +29,6 @@ describe('db', () => {
       expect(env.DB.prepare).toHaveBeenCalledWith(
         'INSERT OR IGNORE INTO entries (id, timestamp, date, project, sections, content) VALUES (?, ?, ?, ?, ?, ?)'
       );
-      // Verify bind was called (on the statement returned by prepare)
       const stmt = (env.DB.prepare as any).mock.results[0].value;
       expect(stmt.bind).toHaveBeenCalledWith(
         entry.id,
@@ -107,7 +106,6 @@ describe('db', () => {
 
   describe('listRecentEntries', () => {
     it('should query with timestamp cutoff and limit', async () => {
-      const now = Date.now();
       const entries = [createMockEntryRow()];
       const stmt = {
         bind: vi.fn().mockReturnThis(),
@@ -159,12 +157,14 @@ describe('db', () => {
 
       expect(result).toEqual({
         id: row.id,
+        path: row.id,
         score: 0.95,
         timestamp: row.timestamp,
         date: row.date,
+        source: 'journal',
         sections: ['Feelings', 'Project Notes'],
         excerpt: expect.any(String),
-        path: row.id,
+        project: 'test-project',
       });
     });
 
@@ -173,7 +173,7 @@ describe('db', () => {
       const row = createMockEntryRow({ content: longContent }) as EntryRow;
       const result = rowToSearchResult(row, 0.5);
 
-      expect(result.excerpt).toHaveLength(203); // 200 + '...'
+      expect(result.excerpt).toHaveLength(203);
       expect(result.excerpt.endsWith('...')).toBe(true);
     });
 
@@ -182,6 +182,44 @@ describe('db', () => {
       const result = rowToSearchResult(row, 0.5);
 
       expect(result.excerpt).toBe('short');
+    });
+  });
+
+  describe('exchangeToSearchResult', () => {
+    it('should convert exchange row to search result', () => {
+      const row: ExchangeRow = {
+        id: 'exc-abc123',
+        session_id: 'session-1',
+        project: 'test-project',
+        timestamp: 1705312800000,
+        date: '2025-01-15',
+        user_message: 'How do I fix this bug?',
+        assistant_message: 'Try checking the logs.',
+        tool_names: 'Read,Edit',
+        created_at: 1705312800,
+      };
+      const result = exchangeToSearchResult(row, 0.85);
+
+      expect(result.source).toBe('chat');
+      expect(result.session_id).toBe('session-1');
+      expect(result.excerpt).toBe('How do I fix this bug?');
+    });
+  });
+
+  describe('insertEntryFts', () => {
+    it('should insert into FTS table', async () => {
+      await insertEntryFts(env, 'test-id', 'content', '["Feelings"]');
+
+      expect(env.DB.prepare).toHaveBeenCalledWith(
+        'INSERT INTO entries_fts (id, content, sections) VALUES (?, ?, ?)'
+      );
+    });
+  });
+
+  describe('getExchangesByIds', () => {
+    it('should return empty array for empty ids', async () => {
+      const result = await getExchangesByIds(env, []);
+      expect(result).toEqual([]);
     });
   });
 });

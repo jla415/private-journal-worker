@@ -72,6 +72,7 @@ describe('handleProcessThoughts', () => {
           date: expect.any(String),
           timestamp: expect.any(Number),
           sections: 'Feelings',
+          source: 'journal',
         }),
       }),
     ]);

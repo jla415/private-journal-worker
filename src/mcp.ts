@@ -6,6 +6,7 @@ import { handleProcessThoughts } from './tools/process-thoughts';
 import { handleSearch } from './tools/search';
 import { handleReadEntry } from './tools/read-entry';
 import { handleListRecent } from './tools/list-recent';
+import { handleStats } from './tools/stats';
 
 // MCP JSON-RPC types
 interface McpRequest {
@@ -60,13 +61,16 @@ const TOOLS = {
   },
   search_journal: {
     name: 'search_journal',
-    description: 'Search through your private journal entries using natural language queries.',
+    description: 'Search through your private journal entries and chat history using natural language queries.',
     inputSchema: {
       type: 'object',
       properties: {
         query: {
-          type: 'string',
-          description: 'Natural language search query',
+          oneOf: [
+            { type: 'string' },
+            { type: 'array', items: { type: 'string' }, maxItems: 3 },
+          ],
+          description: 'Natural language search query, or array of 2-3 concepts for AND search',
         },
         limit: {
           type: 'number',
@@ -75,11 +79,29 @@ const TOOLS = {
         sections: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Filter by section types',
+          description: 'Filter by section types (journal entries only)',
         },
         project: {
           type: 'string',
           description: 'Filter by project name',
+        },
+        after: {
+          type: 'string',
+          description: 'Only return entries after this date (ISO format, e.g. 2025-01-01)',
+        },
+        before: {
+          type: 'string',
+          description: 'Only return entries before this date (ISO format, e.g. 2025-06-01)',
+        },
+        mode: {
+          type: 'string',
+          enum: ['vector', 'text', 'hybrid'],
+          description: 'Search mode: vector (semantic), text (keyword), or hybrid (default)',
+        },
+        source: {
+          type: 'string',
+          enum: ['journal', 'chat', 'all'],
+          description: 'Filter by source: journal entries, chat exchanges, or all (default)',
         },
       },
       required: ['query'],
@@ -87,21 +109,25 @@ const TOOLS = {
   },
   read_journal_entry: {
     name: 'read_journal_entry',
-    description: 'Read the full content of a specific journal entry by ID.',
+    description: 'Read the full content of a specific journal entry or chat exchange by ID.',
     inputSchema: {
       type: 'object',
       properties: {
+        id: {
+          type: 'string',
+          description: 'Entry or exchange ID (from search results)',
+        },
         path: {
           type: 'string',
-          description: 'Entry ID (from search results)',
+          description: 'Deprecated: use id instead',
         },
       },
-      required: ['path'],
+      required: [],
     },
   },
   list_recent_entries: {
     name: 'list_recent_entries',
-    description: 'Get recent journal entries in chronological order.',
+    description: 'Get recent journal entries and chat exchanges in chronological order.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -117,7 +143,21 @@ const TOOLS = {
           type: 'string',
           description: 'Filter by project name',
         },
+        source: {
+          type: 'string',
+          enum: ['journal', 'chat', 'all'],
+          description: 'Filter by source: journal entries, chat exchanges, or all (default)',
+        },
       },
+      required: [],
+    },
+  },
+  journal_stats: {
+    name: 'journal_stats',
+    description: 'Get statistics about journal entries and chat exchanges.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
       required: [],
     },
   },
@@ -132,7 +172,6 @@ function jsonError(error: string, status: number): Response {
 
 export async function handleMcp(request: Request, env: Env): Promise<Response> {
   if (request.method === 'GET') {
-    // SSE connection for streaming (not implemented yet)
     return jsonError('Streaming not implemented', 501);
   }
 
@@ -194,6 +233,9 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
             break;
           case 'list_recent_entries':
             result = await handleListRecent(args, env);
+            break;
+          case 'journal_stats':
+            result = await handleStats(args, env);
             break;
           default:
             response.error = { code: -32601, message: `Unknown tool: ${toolName}` };

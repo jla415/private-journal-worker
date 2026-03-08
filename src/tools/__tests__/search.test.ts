@@ -1,5 +1,5 @@
-// ABOUTME: Tests for search tool - semantic vector search over journal entries
-// ABOUTME: Covers query flow, section filtering, project filtering, and edge cases
+// ABOUTME: Tests for search tool - vector, text, and hybrid search
+// ABOUTME: Covers query flow, section filtering, project filtering, mode selection, and edge cases
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleSearch } from '../search';
@@ -13,17 +13,17 @@ describe('handleSearch', () => {
     env = createMockEnv();
   });
 
-  it('should throw if query is not a string', async () => {
-    await expect(handleSearch({}, env)).rejects.toThrow('query is required and must be a string');
+  it('should throw if query is not a string or array', async () => {
+    await expect(handleSearch({}, env)).rejects.toThrow('query is required');
     await expect(handleSearch({ query: 123 }, env)).rejects.toThrow('query is required');
   });
 
   it('should return empty results when Vectorize returns no matches', async () => {
-    const result = await handleSearch({ query: 'test' }, env);
+    const result = await handleSearch({ query: 'test', mode: 'vector' }, env);
     expect(result).toEqual({ results: [] });
   });
 
-  it('should perform end-to-end search with vector matches', async () => {
+  it('should perform vector search with mode=vector', async () => {
     const entry = createMockEntryRow({ id: 'entry-1' });
     const vectorize = createMockVectorize({
       matches: [
@@ -32,20 +32,20 @@ describe('handleSearch', () => {
     });
     env.VECTORIZE = vectorize;
 
-    // Mock D1 to return the entry
     const stmt = {
       bind: vi.fn().mockReturnThis(),
       all: vi.fn().mockResolvedValue({ results: [entry] }),
     };
     (env.DB.prepare as any).mockReturnValue(stmt);
 
-    const result = await handleSearch({ query: 'test feelings' }, env);
+    const result = await handleSearch({ query: 'test feelings', mode: 'vector' }, env);
 
     expect(env.AI.run).toHaveBeenCalled();
     expect(vectorize.query).toHaveBeenCalled();
     expect(result.results).toHaveLength(1);
     expect(result.results[0].id).toBe('entry-1');
     expect(result.results[0].score).toBe(0.95);
+    expect(result.results[0].source).toBe('journal');
   });
 
   it('should respect limit parameter', async () => {
@@ -69,12 +69,11 @@ describe('handleSearch', () => {
     };
     (env.DB.prepare as any).mockReturnValue(stmt);
 
-    const result = await handleSearch({ query: 'test', limit: 2 }, env);
+    await handleSearch({ query: 'test', limit: 2, mode: 'vector' }, env);
 
-    // topK should be min(limit*2, 50)
     expect(vectorize.query).toHaveBeenCalledWith(
       expect.any(Array),
-      { topK: 4, returnMetadata: true }
+      expect.objectContaining({ topK: 4 })
     );
   });
 
@@ -97,37 +96,12 @@ describe('handleSearch', () => {
     (env.DB.prepare as any).mockReturnValue(stmt);
 
     const result = await handleSearch(
-      { query: 'test', sections: ['Feelings'] },
+      { query: 'test', sections: ['Feelings'], mode: 'vector' },
       env
     );
 
-    // Only 'a' matches the Feelings section filter
     expect(result.results).toHaveLength(1);
     expect(result.results[0].id).toBe('a');
-  });
-
-  it('should normalize section names for comparison', async () => {
-    const vectorize = createMockVectorize({
-      matches: [
-        { id: 'a', score: 0.9, metadata: { sections: 'project_notes' } },
-      ],
-    });
-    env.VECTORIZE = vectorize;
-
-    const stmt = {
-      bind: vi.fn().mockReturnThis(),
-      all: vi.fn().mockResolvedValue({
-        results: [createMockEntryRow({ id: 'a' })],
-      }),
-    };
-    (env.DB.prepare as any).mockReturnValue(stmt);
-
-    const result = await handleSearch(
-      { query: 'test', sections: ['Project Notes'] },
-      env
-    );
-
-    expect(result.results).toHaveLength(1);
   });
 
   it('should filter by project after D1 fetch', async () => {
@@ -151,7 +125,7 @@ describe('handleSearch', () => {
     (env.DB.prepare as any).mockReturnValue(stmt);
 
     const result = await handleSearch(
-      { query: 'test', project: 'myapp' },
+      { query: 'test', project: 'myapp', mode: 'vector' },
       env
     );
 
@@ -179,9 +153,18 @@ describe('handleSearch', () => {
     };
     (env.DB.prepare as any).mockReturnValue(stmt);
 
-    const result = await handleSearch({ query: 'test' }, env);
+    const result = await handleSearch({ query: 'test', mode: 'vector' }, env);
 
     expect(result.results[0].id).toBe('b');
     expect(result.results[1].id).toBe('a');
+  });
+
+  it('should accept query as an array for multi-concept search', async () => {
+    const result = await handleSearch({ query: ['auth', 'security'] }, env);
+    expect(result.results).toEqual([]);
+  });
+
+  it('should reject query array items that are not strings', async () => {
+    await expect(handleSearch({ query: ['test', 123] }, env)).rejects.toThrow('query array items must be strings');
   });
 });

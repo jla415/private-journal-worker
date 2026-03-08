@@ -42,3 +42,36 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   scope TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+
+-- FTS5 full-text search for journal entries
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+  id UNINDEXED,
+  content,
+  sections
+);
+
+-- Chat exchange history
+CREATE TABLE IF NOT EXISTS exchanges (
+  id TEXT PRIMARY KEY,
+  session_id TEXT,
+  project TEXT,
+  timestamp INTEGER NOT NULL,
+  date TEXT NOT NULL,
+  user_message TEXT NOT NULL,
+  assistant_message TEXT NOT NULL,
+  tool_names TEXT,
+  created_at INTEGER DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchanges_timestamp ON exchanges(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_exchanges_session ON exchanges(session_id);
+CREATE INDEX IF NOT EXISTS idx_exchanges_project ON exchanges(project);
+CREATE INDEX IF NOT EXISTS idx_exchanges_date ON exchanges(date DESC);
+
+-- FTS5 full-text search for exchanges
+CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
+  id UNINDEXED,
+  user_message,
+  assistant_message,
+  tool_names UNINDEXED
+);

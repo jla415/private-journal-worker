@@ -2,7 +2,7 @@
 // ABOUTME: Generates embeddings and stores in D1 + Vectorize
 
 import { Env, ProcessThoughtsParams } from '../types';
-import { insertEntry } from '../db';
+import { insertEntry, insertEntryFts } from '../db';
 import { generateEmbedding, extractSearchableText } from '../embeddings';
 
 export async function handleProcessThoughts(
@@ -70,6 +70,9 @@ export async function handleProcessThoughts(
     content,
   });
 
+  // Store in FTS
+  await insertEntryFts(env, id, content, JSON.stringify(sections));
+
   // Store in Vectorize
   await env.VECTORIZE.upsert([
     {
@@ -79,6 +82,7 @@ export async function handleProcessThoughts(
         timestamp: now,
         date,
         sections: sections.join(','),
+        source: 'journal',
       },
     },
   ]);

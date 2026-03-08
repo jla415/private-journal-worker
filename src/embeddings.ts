@@ -26,9 +26,16 @@ export async function generateEmbeddings(env: Env, texts: string[]): Promise<num
   return data.data;
 }
 
+// Max characters to embed (bge-m3 supports 8192 tokens ≈ 24K chars; 6K is conservative)
+const MAX_EMBED_CHARS = 6000;
+
 // Extract searchable text from journal content
 export function extractSearchableText(content: string, sections: string[]): string {
-  // Combine section names with content for better semantic matching
   const sectionPrefix = sections.length > 0 ? `Sections: ${sections.join(', ')}. ` : '';
-  return sectionPrefix + content;
+  return (sectionPrefix + content).slice(0, MAX_EMBED_CHARS);
+}
+
+// Extract searchable text from a chat exchange
+export function extractExchangeText(userMessage: string, assistantMessage: string): string {
+  return (userMessage + '\n' + assistantMessage).slice(0, MAX_EMBED_CHARS);
 }
