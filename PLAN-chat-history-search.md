@@ -14,36 +14,61 @@ These changes improve `search_journal` without any new tables or data sources.
 
 ### 1.1 Date Range Filtering
 
-**File:** `src/tools/search.ts`, `src/types.ts`, `src/mcp.ts`
+**Files:** `src/tools/search.ts`, `src/types.ts`, `src/mcp.ts`
 
 Add `after` and `before` (ISO date strings) parameters to `search_journal`:
 
 - Add `after?: string` and `before?: string` to `SearchParams`
 - Add them to the tool's `inputSchema` in `mcp.ts`
-- In `handleSearch`, after fetching entries from D1 by ID, filter by `entry.date`:
-  - `after`: keep entries where `entry.date >= after`
-  - `before`: keep entries where `entry.date <= before`
-- Alternatively, use Vectorize metadata filtering if the `date` metadata field supports range comparisons (Vectorize metadata filtering supports `$gt`, `$lt` etc. on string fields — verify this works with ISO date strings)
+- Convert ISO date strings to epoch timestamps for filtering
+- Use Vectorize metadata filtering with `$gte`/`$lte` on the numeric `timestamp` metadata field (already stored by `process-thoughts.ts:79`):
+  ```typescript
+  const filter: VectorizeVectorMetadataFilter = {};
+  if (params.after) filter.timestamp = { $gte: new Date(params.after).getTime() };
+  if (params.before) filter.timestamp = { $lte: new Date(params.before + 'T23:59:59Z').getTime() };
+  ```
+- **Note:** Vectorize `$gt`/`$lt` only works on numeric fields, NOT strings. Using `timestamp` (already numeric in metadata) is correct.
 
 ### 1.2 Full-Text Search via D1
 
-**Files:** `schema.sql`, `src/db.ts`, `src/tools/search.ts`
+**Files:** `schema.sql`, `src/db.ts`, `src/tools/search.ts`, `src/tools/process-thoughts.ts`
 
-Add FTS5 virtual table for keyword/phrase search:
+Add FTS5 virtual table for keyword/phrase search.
 
-- **Schema migration:** Add FTS5 table:
-  ```sql
-  CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-    id UNINDEXED,
-    content,
-    sections,
-    content_rowid=rowid
-  );
-  ```
+**Risk:** D1's FTS5 support is unverified. Known Cloudflare bug causes D1 databases with FTS5 tables to become inaccessible after `wrangler d1 export`. **Test FTS5 on D1 first. Never run `wrangler d1 export` on a database with FTS5 tables.**
+
+**Primary approach — FTS5:**
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+  id UNINDEXED,
+  content,
+  sections
+);
+```
+
+Note: No `content_rowid=rowid` — the `entries` table uses `id TEXT PRIMARY KEY` (not integer rowid), so `content_rowid` is invalid. This is a standalone FTS table. Query pattern:
+```sql
+SELECT id, rank FROM entries_fts WHERE entries_fts MATCH ? ORDER BY rank LIMIT ?
+```
+
+**Fallback — LIKE queries (if FTS5 fails on D1):**
+```sql
+SELECT id FROM entries WHERE content LIKE '%' || ? || '%' ORDER BY timestamp DESC LIMIT ?
+```
+No new tables needed. Ranking is by recency not relevance. Acceptable for a fallback.
+
+**Implementation:**
 - **`db.ts`:** Add `insertEntryFts(env, id, content, sections)` — called alongside `insertEntry`
 - **`db.ts`:** Add `searchFts(env, query, limit)` → returns `{id, rank}[]` using `MATCH` and `bm25()`
 - **`process-thoughts.ts`:** After inserting into `entries`, also insert into `entries_fts`
-- **Admin clear:** Also delete from `entries_fts`
+- **Admin clear (`src/index.ts`):** Also delete from `entries_fts`
+- **Backfill endpoint:** Add `POST /admin/backfill-fts` that reads all existing entries and populates the FTS table:
+  ```typescript
+  const rows = await env.DB.prepare('SELECT id, content, sections FROM entries').all<EntryRow>();
+  for (const row of rows.results) {
+    await insertEntryFts(env, row.id, row.content, row.sections);
+  }
+  ```
 
 ### 1.3 Hybrid Search Mode
 
@@ -55,7 +80,7 @@ Add a `mode` parameter to `search_journal`: `"vector"` | `"text"` | `"hybrid"` (
 - `"text"` — FTS5 only, results ranked by BM25
 - `"hybrid"` — run both, deduplicate by ID, merge scores:
   - Normalize vector scores to 0-1 (already cosine similarity)
-  - Normalize FTS BM25 ranks to 0-1 (min-max within result set)
+  - Normalize FTS BM25 ranks to 0-1 (min-max within result set; **single-result edge case: assign 1.0**)
   - Combined score: `0.7 * vector_score + 0.3 * text_score` (tunable)
   - Entries found by only one method get that score alone
 
@@ -63,19 +88,24 @@ Add a `mode` parameter to `search_journal`: `"vector"` | `"text"` | `"hybrid"` (
 
 **Files:** `src/tools/search.ts`, `src/types.ts`, `src/mcp.ts`
 
-Allow `query` to accept a string array (2-5 items) for multi-concept search:
+Allow `query` to accept a string array for multi-concept search:
 
 - Update `inputSchema` to accept `query` as `string | string[]`
-- When array: run independent vector searches for each concept
+- **Cap at 3 concepts** (more = slow + low intersection)
+- When array: run independent vector searches for each concept using `Promise.all` for parallelism
+- **Use `returnMetadata: 'none'` with `topK: 200`** per concept (metadata-free queries allow higher topK)
 - Find entries that appear in ALL result sets (intersection by ID)
 - Average similarity scores across concepts for final ranking
+- Fetch entry metadata from D1 after intersection (not from Vectorize)
 - Respect the `limit` parameter on final results
+
+**Note:** Verify Vectorize topK limits. Current code uses `topK: 50` with `returnMetadata: true` which may already be at or above the limit. With `returnMetadata: 'none'`, topK up to 1000 should be supported.
 
 ---
 
 ## Phase 2: Chat History Ingestion
 
-New tool and schema for ingesting Claude Code conversation exchanges.
+New tables and endpoints for ingesting Claude Code conversation exchanges.
 
 ### 2.1 Exchanges Table
 
@@ -83,15 +113,14 @@ New tool and schema for ingesting Claude Code conversation exchanges.
 
 ```sql
 CREATE TABLE IF NOT EXISTS exchanges (
-  id TEXT PRIMARY KEY,
+  id TEXT PRIMARY KEY,             -- format: exc-{hash} (hash is deterministic for dedup)
   session_id TEXT,
   project TEXT,
   timestamp INTEGER NOT NULL,
   date TEXT NOT NULL,
   user_message TEXT NOT NULL,
   assistant_message TEXT NOT NULL,
-  tool_names TEXT,          -- comma-separated tool names used
-  source TEXT DEFAULT 'chat', -- 'chat' vs 'journal' for unified search
+  tool_names TEXT,                  -- comma-separated tool names used
   created_at INTEGER DEFAULT (unixepoch())
 );
 
@@ -101,61 +130,62 @@ CREATE INDEX IF NOT EXISTS idx_exchanges_project ON exchanges(project);
 CREATE INDEX IF NOT EXISTS idx_exchanges_date ON exchanges(date DESC);
 ```
 
+**Design decisions:**
+- **No `source` column.** Table identity distinguishes journals from exchanges. `entries` = journal, `exchanges` = chat.
+- **Hash as ID.** The `id` is `exc-{hash}` where hash = SHA-256 of `project + session_id + user_message_prefix + timestamp`. The `exc-` prefix enables routing queries to the right table. `INSERT OR IGNORE` handles dedup without a separate column.
+- **Full content stored in D1.** No truncation for storage — only embedding input is truncated.
+
 FTS for exchanges:
 ```sql
 CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
   id UNINDEXED,
   user_message,
   assistant_message,
-  tool_names
+  tool_names UNINDEXED
 );
 ```
 
-### 2.2 Ingest Exchanges Tool
+**Note:** `tool_names` is `UNINDEXED` — low search value, only stored for retrieval.
 
-**New file:** `src/tools/ingest-exchanges.ts`
+### 2.2 Worker Import Endpoint
 
-New MCP tool `ingest_chat_exchanges`:
+**File:** `src/index.ts`
 
+Add `POST /admin/import-conversations` (auth required). **No MCP ingest tool** — ingestion happens via CLI/HTTP, so an MCP tool would waste context.
+
+Request body:
 ```typescript
 {
-  name: 'ingest_chat_exchanges',
-  description: 'Ingest Claude Code conversation exchanges for searchable history.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      exchanges: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            user_message: { type: 'string' },
-            assistant_message: { type: 'string' },
-            session_id: { type: 'string' },
-            project: { type: 'string' },
-            timestamp: { type: 'number' },
-            tool_names: { type: 'array', items: { type: 'string' } }
-          },
-          required: ['user_message', 'assistant_message']
-        },
-        description: 'Array of conversation exchanges to index'
-      }
-    },
-    required: ['exchanges']
-  }
+  exchanges: Array<{
+    user_message: string;
+    assistant_message: string;
+    tool_names?: string[];
+    session_id?: string;
+    project?: string;
+    timestamp?: number;
+  }>
 }
 ```
 
 **Implementation:**
 - For each exchange:
-  - Generate ID: `exc-{date}-{timestamp}-{hash}`
-  - Build searchable text: `user_message + assistant_message + tool_names`
-  - Generate embedding via Workers AI bge-m3
-  - Insert into `exchanges` table
-  - Insert into `exchanges_fts`
-  - Upsert into Vectorize with metadata `{ timestamp, date, source: 'chat', session_id }`
-- Batch embedding generation (Workers AI supports batch) for efficiency
-- Return `{ success: true, count: N, ids: [...] }`
+  1. Generate deterministic hash from `project + session_id + user_message_prefix + timestamp`
+  2. Build ID: `exc-{hash}`
+  3. `INSERT OR IGNORE` into `exchanges` — if row exists, skip entirely (dedup)
+  4. Build searchable text for embedding: `user_message + assistant_message`
+  5. Truncate to **6,000 characters** before embedding (bge-m3 supports 8,192 tokens ≈ 24K chars; 6K is conservative)
+  6. Generate embedding via Workers AI bge-m3
+  7. Insert into `exchanges_fts`
+  8. Upsert into Vectorize with metadata `{ timestamp, date, source: 'chat', session_id }`
+- **Process in batches of 5** per request (embedding is the bottleneck; keeps under 30s Worker CPU limit)
+- Returns `{ imported: N, skipped: N, errors: [...] }`
+
+**Vectorize metadata for source filtering:**
+- New exchanges get `source: 'chat'` in Vectorize metadata
+- Update `process-thoughts.ts` to add `source: 'journal'` to new journal entries going forward
+- **No migration for existing vectors.** Convention: missing `source` metadata = `'journal'`. Filter in code after Vectorize query if needed. (Vectorize doesn't expose stored vectors via `getByIds`, so re-upserting would require regenerating all embeddings — infeasible.)
+
+**Atomicity:** Process each exchange as a unit. If Vectorize upsert fails after D1 insert, delete the D1 row. Alternatively, add a `status` column (`pending` → `indexed`) and only set `indexed` after Vectorize upsert succeeds.
 
 ### 2.3 DB Operations
 
@@ -163,45 +193,77 @@ New MCP tool `ingest_chat_exchanges`:
 
 Add:
 - `insertExchange(env, exchange)` — insert into `exchanges` + `exchanges_fts`
-- `getExchangesByIds(env, ids)` — fetch by ID list
+- `getExchangesByIds(env, ids)` — fetch by ID list (same pattern as `getEntriesByIds`)
 - `searchExchangesFts(env, query, limit)` — FTS5 search on exchanges
+
+**D1 bind limit:** `getEntriesByIds` and `getExchangesByIds` use `bind(...ids)` which has a 100-parameter limit. Add batching:
+```typescript
+async function getEntriesByIds(env: Env, ids: string[]): Promise<EntryRow[]> {
+  if (ids.length === 0) return [];
+  const results: EntryRow[] = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    const placeholders = batch.map(() => '?').join(', ');
+    const result = await env.DB.prepare(`SELECT * FROM entries WHERE id IN (${placeholders})`)
+      .bind(...batch).all<EntryRow>();
+    results.push(...result.results);
+  }
+  return results;
+}
+```
 
 ### 2.4 Unified Search
 
-**File:** `src/tools/search.ts`
+**File:** `src/tools/search.ts`, `src/tools/list-recent.ts`, `src/tools/read-entry.ts`
 
-Modify `search_journal` (or add a new `search_all` tool) to search across both journals and exchanges:
+Modify `search_journal` to search across both journals and exchanges:
 
 - Add `source` filter parameter: `"journal"` | `"chat"` | `"all"` (default: `"all"`)
-- Vectorize already holds both journal and exchange vectors — semantic search is automatically unified
-- For FTS, query both `entries_fts` and `exchanges_fts`, merge results
-- Distinguish result types in output:
-  ```typescript
-  interface SearchResult {
-    // ... existing fields
-    source: 'journal' | 'chat';
-    // for chat results:
-    session_id?: string;
-    user_message_excerpt?: string;
-    assistant_message_excerpt?: string;
-  }
-  ```
-- `read_journal_entry` should also support reading exchanges by ID (detect `exc-` prefix)
+- **ID prefix routing:** After Vectorize query, split matched IDs by prefix:
+  - IDs starting with `exc-` → query `exchanges` table via `getExchangesByIds`
+  - All other IDs → query `entries` table via `getEntriesByIds`
+  - Merge results, preserving scores from Vectorize
+- For FTS hybrid mode, query both `entries_fts` and `exchanges_fts`, merge results
+- If `source` filter is set, skip the irrelevant table/FTS query
+- For Vectorize filtering by source (when `source !== 'all'`): query Vectorize, then filter results in code based on ID prefix (since existing journal vectors lack `source` metadata)
+
+**Update `read_journal_entry`:**
+- Detect `exc-` prefix in the `id` parameter (rename from `path` → `id`)
+- If `exc-` prefix: query `exchanges` table
+- Otherwise: query `entries` table (existing behavior)
+- **Note:** Renaming `path` → `id` is a breaking change for existing MCP clients. Accept this since the tool is personal-use only.
+
+**Update `list_recent_entries`:**
+- Add optional `source` parameter: `"journal"` | `"chat"` | `"all"` (default: `"all"`)
+- When `source` includes chat: also query `exchanges` table ordered by timestamp DESC
+- Merge and re-sort by timestamp, apply limit
+
+**Updated SearchResult type:**
+```typescript
+interface SearchResult {
+  id: string;
+  score: number;
+  timestamp: number;
+  date: string;
+  source: 'journal' | 'chat';
+  // Journal fields:
+  sections?: string[];
+  excerpt: string;
+  // Chat fields:
+  session_id?: string;
+  project?: string;
+}
+```
 
 ---
 
-## Phase 3: Push Sync Client
+## Phase 3: Sync Logic Design
 
-A standalone script that runs on the user's machine, reads Claude Code conversation files, parses them into exchanges, and pushes them to the worker. Ships as part of this repo (e.g. `sync/` directory) and runs via `npx` or as a Claude Code hook.
+This phase designs the parsing and sync protocol. **No standalone `sync/` package** — implementation lives in `cli/src/commands/sync.ts` (Phase 4).
 
-### 3.1 JSONL Parser
-
-**New file:** `sync/parse.ts`
+### 3.1 JSONL Parser Design
 
 Parses Claude Code `.jsonl` conversation files into exchanges:
-
-- **Input:** Path to a `.jsonl` file + project name
-- **Output:** Array of parsed exchanges
 
 ```typescript
 interface ParsedExchange {
@@ -211,11 +273,10 @@ interface ParsedExchange {
   timestamp: number;
   session_id: string;
   project: string;
-  exchange_hash: string;  // deterministic ID for dedup
 }
 ```
 
-**Parsing logic** (mirrors episodic-memory's approach):
+**Parsing algorithm** (mirrors episodic-memory's approach):
 1. Stream JSONL line-by-line
 2. Only process lines where `type === "user"` or `type === "assistant"`
 3. Extract text from `message.content`:
@@ -235,14 +296,12 @@ interface ParsedExchange {
 | Timestamps, session ID, project | Binary/image content |
 | | Sidechain messages (`isSidechain: true`) |
 
-### 3.2 Sync State Tracker
+### 3.2 Sync State Design
 
-**New file:** `sync/state.ts`
+Tracks which files/sessions have already been synced:
 
-Tracks which files/sessions have already been synced to avoid re-uploading:
-
-- **State file location:** `~/.config/private-journal/sync-state.json`
-- **State structure:**
+- **State file:** `~/.config/private-journal/sync-state.json`
+- **Structure:**
   ```typescript
   interface SyncState {
     worker_url: string;
@@ -256,230 +315,51 @@ Tracks which files/sessions have already been synced to avoid re-uploading:
     }
   }
   ```
-- On each sync run:
-  1. Load state file
-  2. For each `.jsonl` file, compare current `mtime`/`size` to stored values
-  3. Skip files that haven't changed
-  4. After successful push, update state entry
+- On each sync: compare current mtime/size to stored, skip unchanged files
 - First run syncs everything; subsequent runs are incremental
 
-### 3.3 Push Client
-
-**New file:** `sync/push.ts`
-
-Pushes parsed exchanges to the worker:
+### 3.3 Push Protocol
 
 - **Auth:** Bearer token from env var `JOURNAL_TOKEN` or `~/.config/private-journal/config.json`
-- **Endpoint:** `POST /admin/import-conversations` on the worker
-- **Batching:** Send exchanges in batches of 20 per request (keeps payload under ~100KB and avoids Worker CPU limits)
-- **Dedup:** Send `exchange_hash` with each exchange; worker skips if already exists (INSERT OR IGNORE)
-- **Error handling:** Log failed batches, continue with remaining; retry transient failures (5xx) up to 3 times with backoff
-- **Response:** Collect `{ imported, skipped }` counts from each batch, report totals
+- **Endpoint:** `POST /admin/import-conversations`
+- **Batching:** Send exchanges in batches of 5-10 per request (embedding is the bottleneck)
+- **Dedup:** Hash-based ID means `INSERT OR IGNORE` handles server-side dedup
+- **Error handling:** Log failed batches, continue with remaining; retry 5xx up to 3 times with backoff
 
-```typescript
-async function pushExchanges(
-  exchanges: ParsedExchange[],
-  workerUrl: string,
-  token: string
-): Promise<{ imported: number; skipped: number; errors: number }>
-```
+### 3.4 File Discovery
 
-### 3.4 CLI Entry Point
+Walk `~/.claude/projects/` to find `<project>/<session>.jsonl` files. Project name = directory name.
 
-**New file:** `sync/cli.ts`
+---
 
-Standalone CLI that orchestrates discover → parse → push:
+## Phase 4: CLI Tool & Claude Code Skills
 
-```
-npx private-journal-sync [options]
+Skills use less context than MCP — MCP tool definitions load every message (~800-1000 tokens), while skill descriptions are ~50 tokens and only expand on invocation. **~10x less context usage** for typical sessions.
 
-Options:
-  --worker-url <url>    Worker URL (or JOURNAL_WORKER_URL env var)
-  --token <token>       Bearer token (or JOURNAL_TOKEN env var)
-  --project <name>      Sync only this project (default: all)
-  --full                Ignore sync state, re-sync everything
-  --dry-run             Parse and report what would be synced, don't push
-```
-
-**Pipeline:**
-1. **Discover:** Walk `~/.claude/projects/` to find all `<project>/<session>.jsonl` files
-2. **Filter:** Check sync state, skip unchanged files
-3. **Parse:** For each changed file, run the JSONL parser to extract exchanges
-4. **Push:** Batch and push exchanges to the worker
-5. **Update state:** Record synced files in state file
-6. **Report:** Print summary (`Synced 47 exchanges from 3 sessions, skipped 12 unchanged files`)
-
-### 3.5 Claude Code Hook (Optional)
-
-**New file:** `sync/hooks.json`
-
-Auto-sync on session end via a Claude Code hook:
-
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "stop",
-        "command": "npx private-journal-sync --quiet"
-      }
-    ]
-  }
-}
-```
-
-Alternatively, as a **SessionStart** hook (sync previous sessions when a new one begins):
-
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "command": "npx private-journal-sync --quiet --background"
-      }
-    ]
-  }
-}
-```
-
-The `--quiet` flag suppresses output except errors. The `--background` flag (SessionStart variant) forks the sync process so it doesn't block session startup.
-
-### 3.6 Worker-Side Import Endpoint
+### 4.1 REST API Endpoints (Worker-Side Prerequisite)
 
 **File:** `src/index.ts`
 
-Add `POST /admin/import-conversations` (auth required):
-
-- Accepts JSON body:
-  ```typescript
-  {
-    exchanges: Array<{
-      user_message: string;
-      assistant_message: string;
-      tool_names?: string[];
-      session_id?: string;
-      project?: string;
-      timestamp?: number;
-      exchange_hash: string;  // for dedup
-    }>
-  }
-  ```
-- For each exchange:
-  - Skip if `exchange_hash` already exists (SELECT before INSERT)
-  - Generate embedding via Workers AI
-  - Insert into `exchanges` + `exchanges_fts` + Vectorize
-- Process in batches of 5-10 (embedding is the bottleneck)
-- Returns `{ imported: N, skipped: N, errors: [...] }`
-
-### 3.7 Configuration
-
-**New file:** `sync/config.ts`
-
-Config resolution (first found wins):
-
-1. CLI flags (`--worker-url`, `--token`)
-2. Environment variables (`JOURNAL_WORKER_URL`, `JOURNAL_TOKEN`)
-3. Config file at `~/.config/private-journal/config.json`:
-   ```json
-   {
-     "worker_url": "https://private-journal.you.workers.dev",
-     "token": "your-bearer-token"
-   }
-   ```
-
-### 3.8 Conversation Stats Tool
-
-**New file:** `src/tools/stats.ts`
-
-New MCP tool `journal_stats`:
-- Returns counts: total journal entries, total chat exchanges, entries by project, date range covered
-- Simple D1 aggregate queries
-
----
-
-## Sync Package Structure
+The CLI needs clean REST endpoints. Current worker only exposes MCP JSON-RPC at `/mcp`.
 
 ```
-sync/
-  cli.ts          # Entry point: discover → parse → push → report
-  parse.ts        # JSONL parser: .jsonl → ParsedExchange[]
-  push.ts         # HTTP client: batch push to worker
-  state.ts        # Incremental sync state (~/.config/private-journal/sync-state.json)
-  config.ts       # Config resolution (CLI > env > file)
-  hooks.json      # Optional Claude Code hook for auto-sync
-  package.json    # Standalone package, deps: only node built-ins + fetch
+GET  /api/search?q=<query>&limit=N&offset=N&mode=vector|text|hybrid&after=DATE&before=DATE&source=journal|chat|all&project=NAME
+GET  /api/entries/:id
+GET  /api/entries/recent?limit=N&days=N&project=NAME&source=journal|chat|all
+POST /api/entries                    # Create journal entry (same body as process_thoughts)
+POST /api/import                     # Bulk import exchanges (alias for /admin/import-conversations)
+GET  /api/stats
 ```
 
-Minimal dependencies: uses Node built-ins (`fs`, `readline`, `path`, `crypto`) plus native `fetch`. No framework needed.
+All endpoints require `Authorization: Bearer <token>`. Responses are JSON.
 
----
+**Implementation notes:**
+- Both MCP and REST call the same handler functions (`handleSearch`, `handleProcessThoughts`, etc.)
+- MCP wraps results in `{ content: [{ type: 'text', text: JSON.stringify(result) }] }`; REST returns raw objects
+- **Path parameter extraction:** Current routing uses `if (path === '...')` string matching. `GET /api/entries/:id` requires pattern matching. Use simple regex: `const match = path.match(/^\/api\/entries\/(.+)$/)`
+- **Pagination:** `GET /api/search` and `GET /api/entries/recent` accept `offset` parameter for pagination. `offset` skips N results after sorting.
 
-## File Change Summary
-
-| File | Change |
-|------|--------|
-| **Worker** | |
-| `schema.sql` | Add `entries_fts`, `exchanges`, `exchanges_fts` tables + indexes |
-| `src/types.ts` | Add `ExchangeRow`, update `SearchParams` (mode, after, before, source), update `SearchResult` |
-| `src/db.ts` | Add FTS insert/search, exchange CRUD, exchange FTS |
-| `src/embeddings.ts` | No changes (already supports batch) |
-| `src/tools/search.ts` | Add hybrid search, multi-concept, date filtering, unified search |
-| `src/tools/ingest-exchanges.ts` | **New** — ingest chat exchanges tool |
-| `src/tools/stats.ts` | **New** — journal stats tool |
-| `src/mcp.ts` | Register new tools, update search schema |
-| `src/index.ts` | Add import endpoint |
-| `src/tools/process-thoughts.ts` | Add FTS insert on write |
-| **Sync client** | |
-| `sync/cli.ts` | **New** — CLI entry point |
-| `sync/parse.ts` | **New** — JSONL conversation parser |
-| `sync/push.ts` | **New** — HTTP push client |
-| `sync/state.ts` | **New** — incremental sync state tracker |
-| `sync/config.ts` | **New** — config resolution |
-| `sync/hooks.json` | **New** — optional Claude Code hook |
-| `sync/package.json` | **New** — standalone package |
-
-## Implementation Order
-
-1. **Phase 1.1** — Date filtering (smallest change, immediate value)
-2. **Phase 1.2** — FTS5 table + insert path
-3. **Phase 1.3** — Hybrid search mode
-4. **Phase 1.4** — Multi-concept search
-5. **Phase 2.1-2.3** — Exchanges table + ingest tool + worker import endpoint
-6. **Phase 2.4** — Unified search across journals + exchanges
-7. **Phase 3.1-3.4** — Sync client: parser, state tracker, push client, CLI
-8. **Phase 3.5** — Claude Code hook for auto-sync
-9. **Phase 3.8** — Stats tool
-
-Each phase is independently deployable. Phase 1 can ship without Phase 2/3. Phase 3 (sync client) requires Phase 2 (exchanges table + import endpoint) on the worker side.
-
-## Key Differences from episodic-memory
-
-| Aspect | episodic-memory | Our approach |
-|--------|----------------|--------------|
-| Runtime | Local Node.js + SQLite | Cloudflare Worker (edge) |
-| Embeddings | Local MiniLM-L6-v2 (384-dim) | Workers AI bge-m3 (1024-dim, higher quality) |
-| Vector search | sqlite-vec extension | Cloudflare Vectorize (managed) |
-| Full-text | SQL LIKE | D1 FTS5 (proper ranking via BM25) |
-| Data source | Auto-sync from local `.jsonl` files | Push via MCP tool or bulk import API |
-| Auth | None (local only) | Bearer token + OAuth 2.1 |
-| Sync | Background hook on session start | Client pushes; no file system access |
-
-## Open Questions
-
-1. **Vectorize metadata filtering** — Verify that Vectorize supports filtering by `source` metadata field. If not, we run a single query and filter post-hoc (already the pattern for sections).
-2. **FTS5 on D1** — Confirm D1 supports FTS5 virtual tables. If not, fall back to `LIKE` queries with appropriate indexing (less ideal but functional).
-3. **Exchange size limits** — Claude conversations can be very long. Should we truncate `user_message` / `assistant_message` in the DB, or store full content? Embedding input is already bounded by the model's context window. Consider storing full content but truncating embedding input to ~2000 chars (matching episodic-memory's approach).
-4. **Worker CPU limits** — Batch ingestion of many exchanges may hit the 30s CPU limit. The bulk import endpoint should process in small batches and potentially use a queue for very large imports.
-
----
-
-## Phase 4: CLI Tool & Claude Code Skill (Alternative to MCP)
-
-Skills use less context than MCP in Claude Code — MCP tool definitions load into the context window on every message, while skill descriptions are budgeted to ~2% of context and only expand fully when invoked. For a personal tool used occasionally during a session, a skill is much more efficient.
-
-### 4.1 CLI Tool: `journal`
-
-A standalone CLI that talks directly to the worker's HTTP API. Can be used from the terminal, from Claude Code skills, or from hooks.
+### 4.2 CLI Tool: `journal`
 
 **New directory:** `cli/`
 
@@ -492,7 +372,7 @@ cli/
       read.ts       # Read full entry
       recent.ts     # List recent entries
       write.ts      # Create journal entry
-      sync.ts       # Sync chat history (absorbs Phase 3 sync client)
+      sync.ts       # Sync chat history (Phase 3 logic lives here)
       stats.ts      # Show stats
     client.ts       # HTTP client wrapper (auth, retries, base URL)
     config.ts       # Config resolution
@@ -523,7 +403,7 @@ journal recent --days 7 --project myapp
 journal write --feelings "frustrated with auth" --project-notes "OAuth PKCE flow working"
 journal write --stdin                   # read content from stdin (piped input)
 
-# Sync chat history
+# Sync chat history (Phase 3 logic)
 journal sync                            # incremental sync
 journal sync --full                     # re-sync everything
 journal sync --project myapp            # sync single project
@@ -534,8 +414,8 @@ journal stats
 journal stats --json
 ```
 
-**Config resolution** (same as Phase 3.7, shared):
-1. CLI flags
+**Config resolution** (first found wins):
+1. CLI flags (`--worker-url`, `--token`)
 2. Environment variables: `JOURNAL_WORKER_URL`, `JOURNAL_TOKEN`
 3. Config file: `~/.config/private-journal/config.json`
 
@@ -555,11 +435,7 @@ journal config set --url https://private-journal.you.workers.dev --token <token>
 - Zero heavy dependencies — uses native `fetch`, `readline`, `crypto`
 - Single `bin` entry: `"journal": "./dist/index.js"`
 
-### 4.2 Claude Code Skill: `journal`
-
-A skill that wraps the CLI, giving Claude natural-language access to the journal without MCP overhead.
-
-**Directory:** `.claude/skills/journal/`
+### 4.3 Claude Code Skill: `journal`
 
 **File: `.claude/skills/journal/SKILL.md`**
 
@@ -613,20 +489,9 @@ journal write --feelings "content" --project-notes "content" --technical-insight
 - Limit searches to 5 results unless the user asks for more
 ```
 
-**Why this works well:**
+**Skill pattern note:** `Bash(journal *)` requires a space after "journal", so bare `journal` (no args) won't match. This is acceptable — all useful commands have arguments. Using `Bash(journal*)` (no space) would match `journalctl` and other system commands, which is worse.
 
-| Aspect | MCP Approach | Skill + CLI Approach |
-|--------|-------------|---------------------|
-| Context cost | ~4 tool definitions loaded every message (~500+ tokens) | ~50 token description; full skill loads only on `/journal` invocation |
-| Auth | Configured in MCP server settings | CLI reads from `~/.config/` — no Claude Code config needed |
-| Latency | JSON-RPC round-trip per tool call | Single `bash` command, direct HTTP to worker |
-| Discoverability | Tools always visible in tool list | Shows as `/journal` slash command |
-| Flexibility | Rigid tool schemas | Natural language — Claude decides which CLI flags to use |
-| Offline use | Requires MCP server running | CLI works standalone from terminal too |
-
-### 4.3 Claude Code Skill: `journal-reflect`
-
-A higher-level skill for end-of-session reflection. Invoked manually or via hook.
+### 4.4 Claude Code Skill: `journal-reflect`
 
 **File: `.claude/skills/journal-reflect/SKILL.md`**
 
@@ -660,9 +525,7 @@ journal write \
 Keep entries concise. Focus on insights that would be valuable to recall later, not a play-by-play of the session.
 ```
 
-### 4.4 Claude Code Skill: `journal-sync`
-
-Dedicated skill for syncing chat history.
+### 4.5 Claude Code Skill: `journal-sync`
 
 **File: `.claude/skills/journal-sync/SKILL.md`**
 
@@ -688,9 +551,9 @@ If no arguments provided, run incremental sync (only new/changed conversations).
 Report the results to the user: how many exchanges were synced, from how many sessions.
 ```
 
-### 4.5 SessionStart Hook (Optional Auto-Sync)
+### 4.6 SessionStart Hook (Optional Auto-Sync)
 
-**File: `.claude/hooks.json`** (or project-level `.claude/settings.json`)
+**File: `.claude/settings.json`** (or project-level)
 
 ```json
 {
@@ -707,372 +570,135 @@ Report the results to the user: how many exchanges were synced, from how many se
 
 Background sync on session start — fires and forgets. Keeps the vector DB current without manual `/journal-sync` invocation.
 
-### 4.6 Implementation Order
+**Concurrent sync risk:** If SessionStart hook triggers while user manually runs `/journal-sync`, two syncs run simultaneously. `INSERT OR IGNORE` handles exact duplicates, but add a file lock (`~/.config/private-journal/sync.lock`) to prevent concurrent syncs.
 
-1. **CLI client** (`cli/src/client.ts`, `cli/src/config.ts`) — HTTP client + config
-2. **CLI search command** — most immediately useful
-3. **CLI read/recent/write commands** — round out the CLI
-4. **Skill: journal** — wrap CLI for Claude Code
-5. **CLI sync command** — absorb Phase 3 sync client into CLI
-6. **Skill: journal-sync** — wrap sync for Claude Code
-7. **Skill: journal-reflect** — higher-level workflow
-8. **Hook: auto-sync** — optional automation
+### 4.7 Stats Tool
 
-### 4.7 Migration Path: MCP → Skill
+**File:** `src/tools/stats.ts`
 
-For users currently using the MCP server:
+New MCP tool `journal_stats`:
+- Returns counts: total journal entries, total chat exchanges, entries by project, date range covered
+- Simple D1 aggregate queries
+- Also exposed via REST: `GET /api/stats`
 
-1. Install CLI: `npm install -g private-journal-cli`
-2. Configure: `journal config set --url <url> --token <token>`
-3. Add skill files to `.claude/skills/journal/`
-4. Remove MCP server from Claude Code settings
-5. Use `/journal search ...` instead of relying on auto-invoked MCP tools
+### 4.8 Plugin Packaging
 
-The worker API is unchanged — both MCP and CLI/skill talk to the same endpoints. Users can run both simultaneously during migration.
-
-### 4.8 Cost & Context Comparison
-
-**MCP (current):**
-- 4 tool definitions (~800-1000 tokens total) loaded every message
-- Over a 50-message session = **~40,000-50,000 tokens** of context spent on tool definitions
-- Tools always visible even when not journal-related
-
-**Skill (proposed):**
-- Skill description in discovery list: **~50 tokens per message**
-- Full skill loads only on invocation: **~400 tokens once**
-- Over a 50-message session with 3 journal lookups = **~3,700 tokens total**
-- **~10x less context usage** for typical sessions
-
-### 4.9 Claude Code Plugin Packaging
-
-Package as a distributable plugin for the Claude Code plugin marketplace, enabling one-command install.
-
-**Plugin directory structure:**
+Package as a distributable Claude Code plugin:
 
 ```
 private-journal-plugin/
 ├── .claude-plugin/
-│   └── plugin.json              # Plugin manifest
+│   └── plugin.json
 ├── skills/
-│   ├── journal/
-│   │   └── SKILL.md             # Main journal skill (search/read/write)
-│   ├── journal-reflect/
-│   │   └── SKILL.md             # End-of-session reflection
-│   └── journal-sync/
-│       └── SKILL.md             # Chat history sync
-├── hooks/
-│   └── hooks.json               # Optional SessionStart auto-sync
-├── commands/
-│   └── journal-setup.md         # Interactive setup wizard
-├── scripts/
-│   └── setup.sh                 # Install CLI + configure token
-├── README.md
-└── LICENSE
+│   ├── journal/SKILL.md
+│   ├── journal-reflect/SKILL.md
+│   └── journal-sync/SKILL.md
+├── hooks/hooks.json
+├── commands/journal-setup.md
+├── scripts/setup.sh
+└── README.md
 ```
 
-**Plugin manifest (`.claude-plugin/plugin.json`):**
-
-```json
-{
-  "name": "private-journal",
-  "description": "Private journal with semantic search, chat history indexing, and session reflection. Backed by your own Cloudflare Worker.",
-  "version": "1.0.0",
-  "author": {
-    "name": "jla415",
-    "url": "https://github.com/jla415"
-  },
-  "repository": "https://github.com/jla415/private-journal-plugin",
-  "license": "MIT",
-  "keywords": ["journal", "memory", "search", "semantic", "recall"]
-}
-```
-
-**Setup command (`commands/journal-setup.md`):**
-
-```yaml
----
-name: journal-setup
-description: Set up the private journal CLI and configure your worker connection.
-allowed-tools: Bash(*)
----
-
-# Journal Setup
-
-Help the user set up the private journal CLI:
-
-1. Check if `journal` CLI is installed: `which journal || echo "not installed"`
-2. If not installed: `npm install -g private-journal-cli`
-3. Ask the user for their worker URL and API token
-4. Configure: `journal config set --url <url> --token <token>`
-5. Verify: `journal stats --json`
-6. Report success or troubleshoot errors
-```
-
-**Marketplace distribution:**
-
-Option A — **Own marketplace** (private/small audience):
-```json
-{
-  "name": "jla415-plugins",
-  "owner": { "name": "jla415" },
-  "plugins": [
-    {
-      "name": "private-journal",
-      "source": { "source": "github", "repo": "jla415/private-journal-plugin" },
-      "description": "Private journal with semantic search and chat history",
-      "version": "1.0.0"
-    }
-  ]
-}
-```
-
-Users install with:
-```bash
-/plugin marketplace add jla415/private-journal-plugin
-/plugin install private-journal
-```
-
-Option B — **Submit to official Anthropic marketplace** (public):
-- Submit at https://claude.ai/settings/plugins/submit or https://platform.claude.com/plugins/submit
-- Users discover via `/plugin` → Discover tab
-- One-click install with scope selection (user/project/local)
-
-**Install experience:**
-
-```
-1. /plugin marketplace add jla415/private-journal-plugin
-2. /plugin install private-journal
-3. /journal-setup                    # Interactive setup wizard
-4. /journal search "my first query"  # Ready to go
-```
-
-**Plugin vs standalone skills:**
-
-| Distribution | Install | Updates | Best for |
-|-------------|---------|---------|----------|
-| Plugin marketplace | `/plugin install` | Auto-update | Public distribution, easy install |
-| Git repo + manual copy | Copy `.claude/skills/` | Manual git pull | Personal use, full control |
-| npm + CLAUDE.md instructions | `npm install -g` + copy skills | `npm update` | Technical users |
-
-### 4.10 Worker-Side REST API for CLI
-
-The current worker only exposes MCP JSON-RPC at `/mcp`. The CLI needs clean REST endpoints.
-
-**New routes to add to `src/index.ts`:**
-
-```
-GET  /api/search?q=<query>&limit=N&mode=vector|text|hybrid&after=DATE&before=DATE&source=journal|chat|all&project=NAME
-GET  /api/entries/:id
-GET  /api/entries/recent?limit=N&days=N&project=NAME
-POST /api/entries                    # Create journal entry (same body as process_thoughts)
-POST /api/import                     # Bulk import exchanges (same as /admin/import-conversations)
-GET  /api/stats
-```
-
-All endpoints require `Authorization: Bearer <token>`. Responses are JSON. The MCP endpoint continues to work alongside REST — both call the same underlying handler functions.
-
-This is a prerequisite for the CLI. Without REST endpoints, the CLI would need to construct MCP JSON-RPC payloads, which is awkward and fragile.
+Install: `/plugin install private-journal` → runs setup wizard → ready to use.
 
 ---
 
-## Review Findings & Corrections
+## Admin Endpoints Update
 
-Issues identified during plan review, with resolutions:
+**File:** `src/index.ts`
 
-### Critical
+### `/admin/clear` — updated to handle all tables
 
-**C1. FTS5 support on D1 is unverified and risky**
+Add optional `?source=journal|chat` parameter:
 
-D1 may not support FTS5 virtual tables. Additionally, a known Cloudflare bug causes D1 databases with FTS5 tables to become inaccessible after export. **Resolution:** Test FTS5 on D1 before committing. Design a fallback using `LIKE`/`INSTR` queries with a tokenized terms table if FTS5 fails. Never run `wrangler d1 export` on a database with FTS5 tables.
+- No parameter: clear everything (entries + exchanges + all Vectorize vectors)
+- `?source=journal`: clear `entries` + `entries_fts`, delete Vectorize vectors by ID (get IDs from D1, not Vectorize)
+- `?source=chat`: clear `exchanges` + `exchanges_fts`, delete Vectorize vectors by ID (get IDs from D1)
 
-**C2. FTS5 schema error — `content_rowid=rowid` is invalid**
+**Note:** Vectorize has no "query all by metadata" API, so get IDs from the D1 table first, then `deleteByIds` in batches of 100.
 
-The `entries` table uses `id TEXT PRIMARY KEY`, making `content_rowid=rowid` meaningless. **Resolution:** Use standalone FTS5 tables without `content_rowid`:
-```sql
-CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(id UNINDEXED, content, sections);
-```
+### `/admin/backfill-fts` — new
 
-**C3. Vectorize metadata migration needed**
+Backfill FTS tables for entries that predate FTS setup. Reads all rows from `entries`, inserts into `entries_fts`.
 
-Existing vectors lack `source` metadata. Vectorize metadata indexes must exist before vectors are inserted. **Resolution:** Add a migration that:
-1. Creates `source` metadata index on the Vectorize index
-2. Re-upserts all existing journal vectors with `source: 'journal'`
-3. Updates `process-thoughts.ts` to include `source: 'journal'` going forward
-Convention: missing `source` metadata = `'journal'` (backward compatibility)
+---
 
-**C4. Embedding input truncation strategy undefined**
+## File Change Summary
 
-bge-m3 has a 512-token limit (~1500-2000 chars). Chat exchanges can be much longer. **Resolution:** Truncate combined text to 1500 characters before embedding. Store full content in D1 for retrieval, but only embed the first 1500 chars. Accept the trade-off that long exchanges may not be fully searchable by semantic content.
+| File | Change |
+|------|--------|
+| **Worker** | |
+| `schema.sql` | Add `entries_fts`, `exchanges`, `exchanges_fts` tables + indexes |
+| `src/types.ts` | Add `ExchangeRow`, update `SearchParams` (mode, after, before, source), update `SearchResult` |
+| `src/db.ts` | Add FTS insert/search, exchange CRUD, exchange FTS, ID batching for >100 |
+| `src/embeddings.ts` | Add `extractExchangeText(user_msg, assistant_msg)` with 6K char truncation |
+| `src/tools/search.ts` | Add hybrid search, multi-concept, date filtering, unified search with ID prefix routing |
+| `src/tools/read-entry.ts` | Support exchange IDs (detect `exc-` prefix), rename `path` param to `id` |
+| `src/tools/list-recent.ts` | Add `source` filter, query both tables |
+| `src/tools/stats.ts` | **New** — journal stats tool |
+| `src/mcp.ts` | Register stats tool, update search/read schemas |
+| `src/index.ts` | Add import endpoint, backfill-fts endpoint, REST API routes, update admin/clear |
+| `src/tools/process-thoughts.ts` | Add FTS insert on write, add `source: 'journal'` to Vectorize metadata |
+| **CLI** | |
+| `cli/src/index.ts` | **New** — CLI entry point |
+| `cli/src/commands/*.ts` | **New** — search, read, recent, write, sync, stats commands |
+| `cli/src/client.ts` | **New** — HTTP client wrapper |
+| `cli/src/config.ts` | **New** — config resolution |
+| `cli/src/output.ts` | **New** — output formatting |
+| `cli/package.json` | **New** — standalone package |
+| **Skills** | |
+| `.claude/skills/journal/SKILL.md` | **New** — main journal skill |
+| `.claude/skills/journal-reflect/SKILL.md` | **New** — reflection skill |
+| `.claude/skills/journal-sync/SKILL.md` | **New** — sync skill |
 
-### Important
+## Implementation Order
 
-**I1. Phase 3 sync package is redundant with Phase 4 CLI**
-
-Phase 3 builds a standalone `sync/` package that Phase 4 absorbs. **Resolution:** Skip the standalone sync package. Build sync logic directly as a CLI command in Phase 4. Phase 3 becomes "design the sync logic" not "build a separate tool."
-
-**I2. `ingest_chat_exchanges` MCP tool is unnecessary**
-
-If ingestion happens via CLI/HTTP, the MCP tool wastes context. **Resolution:** Drop the MCP tool. The HTTP import endpoint is sufficient.
-
-**I3. Vectorize `$gt`/`$lt` only works on numbers, not strings**
-
-Date range filtering must use `timestamp` (numeric), not `date` (string). **Resolution:** Convert ISO date strings to epoch timestamps before Vectorize metadata filtering.
-
-**I4. `exchange_hash` dedup — schema mismatch**
-
-`exchange_hash` is not a column in the proposed exchanges schema. **Resolution:** Use the hash as the primary key `id` directly. Simplest approach, no extra column needed.
-
-**I5. Missing FTS backfill for existing entries**
-
-New FTS table won't contain existing entries. **Resolution:** Add an admin endpoint `POST /admin/backfill-fts` that reads all entries and populates the FTS table.
-
-**I6. `/admin/clear` must handle all new tables**
-
-**Resolution:** Update to clear `entries`, `entries_fts`, `exchanges`, `exchanges_fts`, and all Vectorize vectors. Add optional `?source=journal|chat` parameter.
-
-**I7. Multi-concept AND search scaling**
-
-5 concepts = 5 embedding calls + 5 Vectorize queries. **Resolution:** Run embedding generation with `Promise.all` for parallelism. Cap concepts at 3. Use topK=100 without metadata for larger candidate pools, then fetch metadata from D1.
-
-**I8. Hook `PostToolUse` with matcher `stop` is invalid**
-
-No `stop` tool exists. **Resolution:** Remove that example. Use `SessionStart` hook only, accepting one-session delay.
-
-### Minor
-
-- **M1.** `tool_names` in FTS has low search value → make it UNINDEXED
-- **M2.** Hybrid score normalization: single-result edge case → assign 1.0
-- **M3.** `source` column on exchanges table is redundant → remove, use table identity
-- **M4.** Skill `Bash(journal *)` won't match bare `journal` → use `Bash(journal*)`
-- **M5.** CLI needs `journal` on PATH → document `npm install -g` requirement in setup skill
-- **M6.** No rate limiting on import endpoint → add basic per-token rate limiting
-- **M7.** No tests in repo → add testing section (unit: parser, integration: hybrid search, e2e: import)
-- **M8.** `path` parameter name for entry IDs is misleading → rename to `id` when adding exchange support
-
-### Updated Implementation Order
-
-Incorporating fixes and removing redundancy:
-
-1. **Phase 1.1** — Date filtering (use `timestamp` for Vectorize, not `date` string)
-2. **Phase 1.2** — FTS table + insert path (**verify FTS5 on D1 first**; design LIKE fallback)
-3. **Phase 1.2b** — FTS backfill migration for existing entries
+1. **Phase 1.1** — Date filtering (use numeric `timestamp` for Vectorize)
+2. **Phase 1.2** — FTS5 table + insert path (**verify FTS5 on D1 first**; have LIKE fallback ready)
+3. **Phase 1.2b** — FTS backfill endpoint for existing entries
 4. **Phase 1.3** — Hybrid search mode
-5. **Phase 1.4** — Multi-concept search (cap at 3 concepts, parallel embeddings)
-6. **Phase 2.1** — Exchanges table (use hash as ID, no MCP ingest tool)
-7. **Phase 2.2** — Worker import endpoint + Vectorize metadata migration
-8. **Phase 2.3** — Unified search across journals + exchanges
-9. **Phase 4.10** — REST API endpoints on worker (prerequisite for CLI)
-10. **Phase 4.1** — CLI tool with search/read/write commands
-11. **Phase 4.1b** — CLI sync command (includes parser from Phase 3)
-12. **Phase 4.2-4.4** — Claude Code skills (journal, reflect, sync)
-13. **Phase 4.9** — Plugin packaging + marketplace submission
-14. **Phase 4.5** — SessionStart hook for auto-sync
+5. **Phase 1.4** — Multi-concept search (cap at 3, parallel embeddings, topK:200 without metadata)
+6. **Phase 2.1** — Exchanges table schema
+7. **Phase 2.2** — Worker import endpoint + Vectorize metadata update to `process-thoughts.ts`
+8. **Phase 2.3** — Exchange DB operations
+9. **Phase 2.4** — Unified search (ID prefix routing, update list-recent, update read-entry)
+10. **Phase 4.1** — REST API endpoints on worker
+11. **Phase 4.2** — CLI tool with search/read/write commands
+12. **Phase 4.2b** — CLI sync command (Phase 3 parsing + push logic)
+13. **Phase 4.3-4.5** — Claude Code skills (journal, reflect, sync)
+14. **Phase 4.6** — SessionStart hook for auto-sync
+15. **Phase 4.7** — Stats tool
+16. **Phase 4.8** — Plugin packaging
+
+Each phase is independently deployable. Phase 1 ships without Phase 2-4. Phase 2 (exchanges) is prerequisite for Phase 4 sync command.
 
 ---
 
-## Second Review Findings
+## Key Differences from episodic-memory
 
-Issues found after the first review corrections were applied:
+| Aspect | episodic-memory | Our approach |
+|--------|----------------|--------------|
+| Runtime | Local Node.js + SQLite | Cloudflare Worker (edge) |
+| Embeddings | Local MiniLM-L6-v2 (384-dim) | Workers AI bge-m3 (1024-dim, 8192-token context) |
+| Vector search | sqlite-vec extension | Cloudflare Vectorize (managed) |
+| Full-text | SQL LIKE | D1 FTS5 (proper ranking via BM25) with LIKE fallback |
+| Data source | Auto-sync from local `.jsonl` files | Push via CLI + HTTP import API |
+| Auth | None (local only) | Bearer token + OAuth 2.1 |
+| Sync | Background hook on session start | CLI push; SessionStart hook optional |
 
-### Unresolved Corrections
+---
 
-**U1. C1 fallback never designed — FTS5 failure has no concrete plan B**
+## Known Risks & Constraints
 
-The correction says "design a fallback using LIKE/INSTR" but the main plan body (Phase 1.2) still only shows the FTS5 schema. If FTS5 fails on D1, implementation is blocked. **Concrete fallback:** Use `SELECT id FROM entries WHERE content LIKE '%' || ? || '%' ORDER BY timestamp DESC LIMIT ?` on the existing `content` column. No new tables needed. Ranking is by recency not relevance, which is acceptable for a fallback. The trade-off (no BM25 scoring) is documented.
+1. **FTS5 on D1** — Unverified. LIKE fallback designed. Test before committing.
+2. **Vectorize topK with metadata** — Current code uses `topK: 50` with `returnMetadata: true`. Verify this is within limits. If capped at 20, reduce default or switch to metadata-free queries + D1 lookup.
+3. **Worker CPU limits** — 30s CPU limit. Import endpoint processes 5 exchanges per batch. Monitor real-world timing.
+4. **Workers AI rate limits** — Batch embedding + sync could hit limits. Add backoff in CLI sync.
+5. **Vectorize free plan** — 5M vector limit. At ~10 exchanges/session, 50 sessions/day = 500 vectors/day = ~27 years before limit. Not a concern for personal use.
+6. **No vector migration** — Existing journal vectors lack `source` metadata. Treat missing = journal. Don't attempt to re-upsert (Vectorize doesn't expose stored vectors).
 
-**U2. C3 migration is infeasible — can't re-read vectors from Vectorize**
+---
 
-The correction says "re-upsert all existing journal vectors with `source: 'journal'`" but Vectorize doesn't return vector values on read (`getByIds` returns metadata only). You'd need to regenerate embeddings from D1 content, which costs Workers AI calls for every existing entry. **Resolution:** Drop the migration. Adopt the convention: missing `source` metadata = `'journal'`. Only new entries and exchanges get explicit `source` metadata. Filter in code after Vectorize query if needed.
+## Pre-Existing Bug (Unrelated to Plan)
 
-**U3. C4 has wrong token limit — bge-m3 supports 8192 tokens, not 512**
-
-The correction states "bge-m3 has a 512-token limit (~1500-2000 chars)" and truncates to 1500 chars. This is incorrect — `@cf/baai/bge-m3` supports 8,192 tokens (~24,000 chars). The 512-token limit applies to older models like `bge-small-en-v1.5`. **Resolution:** Truncate to 6,000 characters (conservative estimate for 8K tokens). This covers the vast majority of chat exchanges without aggressive truncation.
-
-**U4. I7 topK ceiling — Vectorize allows topK up to 1000 without metadata**
-
-The correction says "use topK=100" but doesn't mention that this requires `returnMetadata: 'none'` (current code uses `returnMetadata: true` which caps topK at 50). **Resolution:** For multi-concept search, query with `returnMetadata: 'none'` and `topK: 200` per concept, then fetch entry metadata from D1 after intersection.
-
-### Plan Body vs Corrections Inconsistencies
-
-**S1. Phase 3 body still describes standalone sync/ package**
-
-Lines 195-411 describe a full `sync/` directory with its own `cli.ts`, `parse.ts`, `push.ts`, etc. Correction I1 says "skip the standalone sync package." An implementer reading top-to-bottom will build the wrong thing. **Resolution:** Phase 3 body should be rewritten as "sync logic design" — specifying the parsing algorithm and push protocol without a standalone package. The implementation lives in `cli/src/commands/sync.ts` (Phase 4).
-
-**S2. Phase 2.2 body still describes MCP ingest tool**
-
-Lines 116-158 define `ingest_chat_exchanges` as an MCP tool with full schema. Correction I2 says "drop the MCP tool." **Resolution:** Remove the MCP tool section. Phase 2.2 should describe only the HTTP import endpoint (currently in Phase 3.6).
-
-**S3. File Change Summary is stale**
-
-Line 427 lists `src/tools/ingest-exchanges.ts` as a new file (dropped by I2). The `sync/` directory files (lines 432-438) should be under `cli/` per I1. `src/embeddings.ts` is listed as "No changes" but needs truncation logic (U3).
-
-**S4. Phase 1.2 body still uses `content_rowid=rowid`**
-
-Line 41 shows `content_rowid=rowid` which C2 corrected. The body was never updated.
-
-**S5. Phase 1.1 body still suggests string-based Vectorize date filtering**
-
-Line 26 says "verify this works with ISO date strings" — I3 already resolved this: use numeric `timestamp`, not string `date`.
-
-### New Issues
-
-**N1. Existing bug: OAuth refresh token never persists (src/oauth.ts:353-355)**
-
-The refresh token code path calls `env.DB.prepare(...).bind(...)` but never calls `.run()`. New access tokens from refresh are silently not saved. This is a live bug. Not plan-related, but should be fixed.
-
-**N2. No transactional rollback for batch import failures**
-
-If embedding generation fails mid-batch (e.g., Workers AI quota), already-inserted D1 rows become orphaned (no matching Vectorize vector). D1 supports `batch()` for atomic multi-statement execution but not across D1+Vectorize. **Resolution:** Process each exchange as an atomic unit: D1 insert + Vectorize upsert. If Vectorize fails, delete the D1 row. Or use a `status` column (`pending` → `indexed`) and only mark `indexed` after Vectorize upsert succeeds.
-
-**N3. REST endpoints (4.10) need shared handler refactoring**
-
-Both MCP and REST call the same functions but wrap results differently. The plan should note that `handleSearch`, `handleProcessThoughts`, etc. are the shared layer, with MCP and REST as thin wrappers. No new abstraction needed — just document that `src/tools/*.ts` functions return raw objects, MCP wraps in `{ content: [{ type: 'text', text: JSON.stringify(result) }] }`, and REST returns as-is.
-
-**N4. `handleReadEntry` returns error objects instead of throwing**
-
-This means MCP reports "not found" as a successful response with error text in content, rather than a JSON-RPC error. This is arguably fine (the LLM sees the error message) but differs from `handleSearch` which throws. When adding exchange support to `read_journal_entry`, keep the return-error pattern consistent.
-
-**N5. Skill pattern `Bash(journal*)` matches `journalctl` and other system commands**
-
-M4's fix (`Bash(journal*)` without space) would match `journalctl`, `journald`, etc. Keep the original `Bash(journal *)` pattern (requires space after "journal") and accept that bare `journal` (no args) won't match.
-
-**N6. M7 is now partially resolved — 71 unit tests added**
-
-Test coverage added: db.ts, embeddings.ts, auth.ts, mcp.ts, index.ts, and all 4 tools. Integration and e2e tests still needed for future phases.
-
-**N7. `handleSearch` only queries `entries` table — breaks unified Vectorize search**
-
-A unified Vectorize index returns both journal entry IDs and exchange IDs. But `handleSearch` calls `getEntriesByIds` (`src/db.ts:38`) which only queries the `entries` table. Exchange IDs in vector results would be silently dropped. **Resolution:** After Vectorize query, split matched IDs by prefix (`exc-` → exchanges table, everything else → entries table), query both tables, merge results.
-
-**N8. `list_recent_entries` ignores exchanges**
-
-Only queries `entries` table. Plan's unified search (Phase 2.4) never mentions updating `list_recent_entries` to also show recent exchanges. The file change summary doesn't list `list-recent.ts` at all.
-
-**N9. No search result pagination for REST API**
-
-Phase 4.10 defines `GET /api/search` and `GET /api/entries/recent` with `limit` but no `offset` or cursor. CLI commands like `journal search` would benefit from pagination for large result sets.
-
-**N10. No exchange retention/TTL policy**
-
-Journal entries are curated; chat exchanges accumulate indefinitely. Vectorize free plan has a 5M vector limit. No mention of cleanup, archiving, or TTL for old exchanges. Should at minimum document expected growth rate and when limits would be hit.
-
-**N11. D1 `bind(...ids)` has a 100-parameter limit**
-
-`getEntriesByIds` uses `bind(...ids)` with `IN (?, ?, ...)`. D1 limits bound parameters to 100 per query. Hybrid search merging vector + FTS results, or multi-concept intersection, could theoretically exceed this. Add batching in `getEntriesByIds` for >100 IDs.
-
-**N12. Concurrent sync conflicts**
-
-If `SessionStart` hook triggers background sync while user manually runs `/journal-sync`, two syncs run simultaneously. `INSERT OR IGNORE` handles exact duplicates, but partial failures could leave inconsistent state. Add a file lock or sync-in-progress check.
-
-**N13. Vectorize topK may be 20 (not 50) with full metadata**
-
-Current code uses `topK: Math.min(limit * 2, 50)` with `returnMetadata: true`. Cloudflare docs may limit topK to 20 when returning all metadata. Verify actual limit — if 20, multi-concept intersection with small candidate pools will miss relevant results.
-
-### Summary Table
-
-| Category | Count | Status |
-|----------|-------|--------|
-| Corrections not fully resolved | 4 | U1-U4 need fixes |
-| Body/corrections inconsistent | 5 | S1-S5 need body rewrite |
-| New issues (second review) | 13 | N1-N13 identified |
-| Total first-review items resolved | 14/20 | 70% clean |
+**OAuth refresh token never persists (`src/oauth.ts:353-355`).** The code calls `env.DB.prepare(...).bind(...)` but never calls `.run()`. New access tokens from refresh are silently not saved. Should be fixed independently.
