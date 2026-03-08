@@ -733,12 +733,237 @@ The worker API is unchanged — both MCP and CLI/skill talk to the same endpoint
 ### 4.8 Cost & Context Comparison
 
 **MCP (current):**
-- 4 tool definitions × ~150 tokens each = **~600 tokens per message** in context
-- Over a 50-message session = **~30,000 tokens** of context spent on tool definitions
+- 4 tool definitions (~800-1000 tokens total) loaded every message
+- Over a 50-message session = **~40,000-50,000 tokens** of context spent on tool definitions
 - Tools always visible even when not journal-related
 
 **Skill (proposed):**
 - Skill description in discovery list: **~50 tokens per message**
 - Full skill loads only on invocation: **~400 tokens once**
 - Over a 50-message session with 3 journal lookups = **~3,700 tokens total**
-- **~8x less context usage** for typical sessions
+- **~10x less context usage** for typical sessions
+
+### 4.9 Claude Code Plugin Packaging
+
+Package as a distributable plugin for the Claude Code plugin marketplace, enabling one-command install.
+
+**Plugin directory structure:**
+
+```
+private-journal-plugin/
+├── .claude-plugin/
+│   └── plugin.json              # Plugin manifest
+├── skills/
+│   ├── journal/
+│   │   └── SKILL.md             # Main journal skill (search/read/write)
+│   ├── journal-reflect/
+│   │   └── SKILL.md             # End-of-session reflection
+│   └── journal-sync/
+│       └── SKILL.md             # Chat history sync
+├── hooks/
+│   └── hooks.json               # Optional SessionStart auto-sync
+├── commands/
+│   └── journal-setup.md         # Interactive setup wizard
+├── scripts/
+│   └── setup.sh                 # Install CLI + configure token
+├── README.md
+└── LICENSE
+```
+
+**Plugin manifest (`.claude-plugin/plugin.json`):**
+
+```json
+{
+  "name": "private-journal",
+  "description": "Private journal with semantic search, chat history indexing, and session reflection. Backed by your own Cloudflare Worker.",
+  "version": "1.0.0",
+  "author": {
+    "name": "jla415",
+    "url": "https://github.com/jla415"
+  },
+  "repository": "https://github.com/jla415/private-journal-plugin",
+  "license": "MIT",
+  "keywords": ["journal", "memory", "search", "semantic", "recall"]
+}
+```
+
+**Setup command (`commands/journal-setup.md`):**
+
+```yaml
+---
+name: journal-setup
+description: Set up the private journal CLI and configure your worker connection.
+allowed-tools: Bash(*)
+---
+
+# Journal Setup
+
+Help the user set up the private journal CLI:
+
+1. Check if `journal` CLI is installed: `which journal || echo "not installed"`
+2. If not installed: `npm install -g private-journal-cli`
+3. Ask the user for their worker URL and API token
+4. Configure: `journal config set --url <url> --token <token>`
+5. Verify: `journal stats --json`
+6. Report success or troubleshoot errors
+```
+
+**Marketplace distribution:**
+
+Option A — **Own marketplace** (private/small audience):
+```json
+{
+  "name": "jla415-plugins",
+  "owner": { "name": "jla415" },
+  "plugins": [
+    {
+      "name": "private-journal",
+      "source": { "source": "github", "repo": "jla415/private-journal-plugin" },
+      "description": "Private journal with semantic search and chat history",
+      "version": "1.0.0"
+    }
+  ]
+}
+```
+
+Users install with:
+```bash
+/plugin marketplace add jla415/private-journal-plugin
+/plugin install private-journal
+```
+
+Option B — **Submit to official Anthropic marketplace** (public):
+- Submit at https://claude.ai/settings/plugins/submit or https://platform.claude.com/plugins/submit
+- Users discover via `/plugin` → Discover tab
+- One-click install with scope selection (user/project/local)
+
+**Install experience:**
+
+```
+1. /plugin marketplace add jla415/private-journal-plugin
+2. /plugin install private-journal
+3. /journal-setup                    # Interactive setup wizard
+4. /journal search "my first query"  # Ready to go
+```
+
+**Plugin vs standalone skills:**
+
+| Distribution | Install | Updates | Best for |
+|-------------|---------|---------|----------|
+| Plugin marketplace | `/plugin install` | Auto-update | Public distribution, easy install |
+| Git repo + manual copy | Copy `.claude/skills/` | Manual git pull | Personal use, full control |
+| npm + CLAUDE.md instructions | `npm install -g` + copy skills | `npm update` | Technical users |
+
+### 4.10 Worker-Side REST API for CLI
+
+The current worker only exposes MCP JSON-RPC at `/mcp`. The CLI needs clean REST endpoints.
+
+**New routes to add to `src/index.ts`:**
+
+```
+GET  /api/search?q=<query>&limit=N&mode=vector|text|hybrid&after=DATE&before=DATE&source=journal|chat|all&project=NAME
+GET  /api/entries/:id
+GET  /api/entries/recent?limit=N&days=N&project=NAME
+POST /api/entries                    # Create journal entry (same body as process_thoughts)
+POST /api/import                     # Bulk import exchanges (same as /admin/import-conversations)
+GET  /api/stats
+```
+
+All endpoints require `Authorization: Bearer <token>`. Responses are JSON. The MCP endpoint continues to work alongside REST — both call the same underlying handler functions.
+
+This is a prerequisite for the CLI. Without REST endpoints, the CLI would need to construct MCP JSON-RPC payloads, which is awkward and fragile.
+
+---
+
+## Review Findings & Corrections
+
+Issues identified during plan review, with resolutions:
+
+### Critical
+
+**C1. FTS5 support on D1 is unverified and risky**
+
+D1 may not support FTS5 virtual tables. Additionally, a known Cloudflare bug causes D1 databases with FTS5 tables to become inaccessible after export. **Resolution:** Test FTS5 on D1 before committing. Design a fallback using `LIKE`/`INSTR` queries with a tokenized terms table if FTS5 fails. Never run `wrangler d1 export` on a database with FTS5 tables.
+
+**C2. FTS5 schema error — `content_rowid=rowid` is invalid**
+
+The `entries` table uses `id TEXT PRIMARY KEY`, making `content_rowid=rowid` meaningless. **Resolution:** Use standalone FTS5 tables without `content_rowid`:
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(id UNINDEXED, content, sections);
+```
+
+**C3. Vectorize metadata migration needed**
+
+Existing vectors lack `source` metadata. Vectorize metadata indexes must exist before vectors are inserted. **Resolution:** Add a migration that:
+1. Creates `source` metadata index on the Vectorize index
+2. Re-upserts all existing journal vectors with `source: 'journal'`
+3. Updates `process-thoughts.ts` to include `source: 'journal'` going forward
+Convention: missing `source` metadata = `'journal'` (backward compatibility)
+
+**C4. Embedding input truncation strategy undefined**
+
+bge-m3 has a 512-token limit (~1500-2000 chars). Chat exchanges can be much longer. **Resolution:** Truncate combined text to 1500 characters before embedding. Store full content in D1 for retrieval, but only embed the first 1500 chars. Accept the trade-off that long exchanges may not be fully searchable by semantic content.
+
+### Important
+
+**I1. Phase 3 sync package is redundant with Phase 4 CLI**
+
+Phase 3 builds a standalone `sync/` package that Phase 4 absorbs. **Resolution:** Skip the standalone sync package. Build sync logic directly as a CLI command in Phase 4. Phase 3 becomes "design the sync logic" not "build a separate tool."
+
+**I2. `ingest_chat_exchanges` MCP tool is unnecessary**
+
+If ingestion happens via CLI/HTTP, the MCP tool wastes context. **Resolution:** Drop the MCP tool. The HTTP import endpoint is sufficient.
+
+**I3. Vectorize `$gt`/`$lt` only works on numbers, not strings**
+
+Date range filtering must use `timestamp` (numeric), not `date` (string). **Resolution:** Convert ISO date strings to epoch timestamps before Vectorize metadata filtering.
+
+**I4. `exchange_hash` dedup — schema mismatch**
+
+`exchange_hash` is not a column in the proposed exchanges schema. **Resolution:** Use the hash as the primary key `id` directly. Simplest approach, no extra column needed.
+
+**I5. Missing FTS backfill for existing entries**
+
+New FTS table won't contain existing entries. **Resolution:** Add an admin endpoint `POST /admin/backfill-fts` that reads all entries and populates the FTS table.
+
+**I6. `/admin/clear` must handle all new tables**
+
+**Resolution:** Update to clear `entries`, `entries_fts`, `exchanges`, `exchanges_fts`, and all Vectorize vectors. Add optional `?source=journal|chat` parameter.
+
+**I7. Multi-concept AND search scaling**
+
+5 concepts = 5 embedding calls + 5 Vectorize queries. **Resolution:** Run embedding generation with `Promise.all` for parallelism. Cap concepts at 3. Use topK=100 without metadata for larger candidate pools, then fetch metadata from D1.
+
+**I8. Hook `PostToolUse` with matcher `stop` is invalid**
+
+No `stop` tool exists. **Resolution:** Remove that example. Use `SessionStart` hook only, accepting one-session delay.
+
+### Minor
+
+- **M1.** `tool_names` in FTS has low search value → make it UNINDEXED
+- **M2.** Hybrid score normalization: single-result edge case → assign 1.0
+- **M3.** `source` column on exchanges table is redundant → remove, use table identity
+- **M4.** Skill `Bash(journal *)` won't match bare `journal` → use `Bash(journal*)`
+- **M5.** CLI needs `journal` on PATH → document `npm install -g` requirement in setup skill
+- **M6.** No rate limiting on import endpoint → add basic per-token rate limiting
+- **M7.** No tests in repo → add testing section (unit: parser, integration: hybrid search, e2e: import)
+- **M8.** `path` parameter name for entry IDs is misleading → rename to `id` when adding exchange support
+
+### Updated Implementation Order
+
+Incorporating fixes and removing redundancy:
+
+1. **Phase 1.1** — Date filtering (use `timestamp` for Vectorize, not `date` string)
+2. **Phase 1.2** — FTS table + insert path (**verify FTS5 on D1 first**; design LIKE fallback)
+3. **Phase 1.2b** — FTS backfill migration for existing entries
+4. **Phase 1.3** — Hybrid search mode
+5. **Phase 1.4** — Multi-concept search (cap at 3 concepts, parallel embeddings)
+6. **Phase 2.1** — Exchanges table (use hash as ID, no MCP ingest tool)
+7. **Phase 2.2** — Worker import endpoint + Vectorize metadata migration
+8. **Phase 2.3** — Unified search across journals + exchanges
+9. **Phase 4.10** — REST API endpoints on worker (prerequisite for CLI)
+10. **Phase 4.1** — CLI tool with search/read/write commands
+11. **Phase 4.1b** — CLI sync command (includes parser from Phase 3)
+12. **Phase 4.2-4.4** — Claude Code skills (journal, reflect, sync)
+13. **Phase 4.9** — Plugin packaging + marketplace submission
+14. **Phase 4.5** — SessionStart hook for auto-sync
