@@ -1040,11 +1040,39 @@ M4's fix (`Bash(journal*)` without space) would match `journalctl`, `journald`, 
 
 Test coverage added: db.ts, embeddings.ts, auth.ts, mcp.ts, index.ts, and all 4 tools. Integration and e2e tests still needed for future phases.
 
+**N7. `handleSearch` only queries `entries` table — breaks unified Vectorize search**
+
+A unified Vectorize index returns both journal entry IDs and exchange IDs. But `handleSearch` calls `getEntriesByIds` (`src/db.ts:38`) which only queries the `entries` table. Exchange IDs in vector results would be silently dropped. **Resolution:** After Vectorize query, split matched IDs by prefix (`exc-` → exchanges table, everything else → entries table), query both tables, merge results.
+
+**N8. `list_recent_entries` ignores exchanges**
+
+Only queries `entries` table. Plan's unified search (Phase 2.4) never mentions updating `list_recent_entries` to also show recent exchanges. The file change summary doesn't list `list-recent.ts` at all.
+
+**N9. No search result pagination for REST API**
+
+Phase 4.10 defines `GET /api/search` and `GET /api/entries/recent` with `limit` but no `offset` or cursor. CLI commands like `journal search` would benefit from pagination for large result sets.
+
+**N10. No exchange retention/TTL policy**
+
+Journal entries are curated; chat exchanges accumulate indefinitely. Vectorize free plan has a 5M vector limit. No mention of cleanup, archiving, or TTL for old exchanges. Should at minimum document expected growth rate and when limits would be hit.
+
+**N11. D1 `bind(...ids)` has a 100-parameter limit**
+
+`getEntriesByIds` uses `bind(...ids)` with `IN (?, ?, ...)`. D1 limits bound parameters to 100 per query. Hybrid search merging vector + FTS results, or multi-concept intersection, could theoretically exceed this. Add batching in `getEntriesByIds` for >100 IDs.
+
+**N12. Concurrent sync conflicts**
+
+If `SessionStart` hook triggers background sync while user manually runs `/journal-sync`, two syncs run simultaneously. `INSERT OR IGNORE` handles exact duplicates, but partial failures could leave inconsistent state. Add a file lock or sync-in-progress check.
+
+**N13. Vectorize topK may be 20 (not 50) with full metadata**
+
+Current code uses `topK: Math.min(limit * 2, 50)` with `returnMetadata: true`. Cloudflare docs may limit topK to 20 when returning all metadata. Verify actual limit — if 20, multi-concept intersection with small candidate pools will miss relevant results.
+
 ### Summary Table
 
 | Category | Count | Status |
 |----------|-------|--------|
 | Corrections not fully resolved | 4 | U1-U4 need fixes |
 | Body/corrections inconsistent | 5 | S1-S5 need body rewrite |
-| New issues | 6 | N1-N6 identified |
+| New issues (second review) | 13 | N1-N13 identified |
 | Total first-review items resolved | 14/20 | 70% clean |
