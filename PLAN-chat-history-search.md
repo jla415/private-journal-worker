@@ -21,11 +21,18 @@ Add `after` and `before` (ISO date strings) parameters to `search_journal`:
 - Add `after?: string` and `before?: string` to `SearchParams`
 - Add them to the tool's `inputSchema` in `mcp.ts`
 - Convert ISO date strings to epoch timestamps for filtering
-- Use Vectorize metadata filtering with `$gte`/`$lte` on the numeric `timestamp` metadata field (already stored by `process-thoughts.ts:79`):
+- Use Vectorize metadata filtering with `$gte`/`$lte` on the numeric `timestamp` metadata field (already stored in Vectorize upsert metadata in `process-thoughts.ts`):
   ```typescript
   const filter: VectorizeVectorMetadataFilter = {};
   if (params.after) filter.timestamp = { $gte: new Date(params.after).getTime() };
-  if (params.before) filter.timestamp = { $lte: new Date(params.before + 'T23:59:59Z').getTime() };
+  if (params.before) filter.timestamp = { $lte: new Date(params.before + 'T23:59:59.999Z').getTime() };
+
+  // Pass filter into the existing Vectorize query:
+  const vectorResults = await env.VECTORIZE.query(queryEmbedding, {
+    topK: Math.min(limit * 2, 50),
+    returnMetadata: true,
+    filter: Object.keys(filter).length > 0 ? filter : undefined,
+  });
   ```
 - **Note:** Vectorize `$gt`/`$lt` only works on numeric fields, NOT strings. Using `timestamp` (already numeric in metadata) is correct.
 
@@ -62,11 +69,20 @@ No new tables needed. Ranking is by recency not relevance. Acceptable for a fall
 - **`db.ts`:** Add `searchFts(env, query, limit)` → returns `{id, rank}[]` using `MATCH` and `bm25()`
 - **`process-thoughts.ts`:** After inserting into `entries`, also insert into `entries_fts`
 - **Admin clear (`src/index.ts`):** Also delete from `entries_fts`
-- **Backfill endpoint:** Add `POST /admin/backfill-fts` that reads all existing entries and populates the FTS table:
+- **Backfill endpoint:** Add `POST /admin/backfill-fts` that reads all existing entries and populates the FTS table. **Must be idempotent** — FTS5 tables have no unique constraint, so re-running without clearing first creates duplicate rows and corrupted search results.
   ```typescript
-  const rows = await env.DB.prepare('SELECT id, content, sections FROM entries').all<EntryRow>();
-  for (const row of rows.results) {
+  // Clear existing FTS data first (idempotent: safe to re-run)
+  await env.DB.prepare('DELETE FROM entries_fts').run();
+  await env.DB.prepare('DELETE FROM exchanges_fts').run();
+  // Backfill entries
+  const entries = await env.DB.prepare('SELECT id, content, sections FROM entries').all<EntryRow>();
+  for (const row of entries.results) {
     await insertEntryFts(env, row.id, row.content, row.sections);
+  }
+  // Backfill exchanges
+  const exchanges = await env.DB.prepare('SELECT id, user_message, assistant_message, tool_names FROM exchanges').all<ExchangeRow>();
+  for (const row of exchanges.results) {
+    await insertExchangeFts(env, row.id, row.user_message, row.assistant_message, row.tool_names);
   }
   ```
 
@@ -185,15 +201,31 @@ Request body:
 - Update `process-thoughts.ts` to add `source: 'journal'` to new journal entries going forward
 - **No migration for existing vectors.** Convention: missing `source` metadata = `'journal'`. Filter in code after Vectorize query if needed. (Vectorize doesn't expose stored vectors via `getByIds`, so re-upserting would require regenerating all embeddings — infeasible.)
 
-**Atomicity:** Process each exchange as a unit. If Vectorize upsert fails after D1 insert, delete the D1 row. Alternatively, add a `status` column (`pending` → `indexed`) and only set `indexed` after Vectorize upsert succeeds.
+**Atomicity:** Process each exchange as a unit. If Vectorize upsert fails after D1 insert, **delete the D1 row** to keep D1 and Vectorize in sync. No `status` column needed — the rollback-on-failure approach is simpler and the schema stays clean:
+```typescript
+try {
+  await insertExchange(env, exchange);   // D1 + FTS
+  await env.VECTORIZE.upsert([vector]);  // Vectorize
+} catch (err) {
+  await env.DB.prepare('DELETE FROM exchanges WHERE id = ?').bind(exchange.id).run();
+  await env.DB.prepare('DELETE FROM exchanges_fts WHERE id = ?').bind(exchange.id).run();
+  errors.push({ id: exchange.id, error: err.message });
+}
+```
 
 ### 2.3 DB Operations
 
 **File:** `src/db.ts`
 
 Add:
-- `insertExchange(env, exchange)` — insert into `exchanges` + `exchanges_fts`
-- `getExchangesByIds(env, ids)` — fetch by ID list (same pattern as `getEntriesByIds`)
+- `insertExchange(env, exchange)` — insert into `exchanges` + `exchanges_fts`. FTS insert must provide all 4 columns in schema order:
+  ```typescript
+  await env.DB.prepare('INSERT INTO exchanges_fts (id, user_message, assistant_message, tool_names) VALUES (?, ?, ?, ?)')
+    .bind(exchange.id, exchange.user_message, exchange.assistant_message, exchange.tool_names ?? '')
+    .run();
+  ```
+- `insertExchangeFts(env, id, user_message, assistant_message, tool_names)` — standalone FTS insert (used by backfill)
+- `getExchangesByIds(env, ids)` — fetch by ID list (same pattern as `getEntriesByIds`, with batching)
 - `searchExchangesFts(env, query, limit)` — FTS5 search on exchanges
 
 **D1 bind limit:** `getEntriesByIds` and `getExchangesByIds` use `bind(...ids)` which has a 100-parameter limit. Add batching:
@@ -242,6 +274,7 @@ Modify `search_journal` to search across both journals and exchanges:
 ```typescript
 interface SearchResult {
   id: string;
+  path: string;             // deprecated alias for id (kept for backward compat, always === id)
   score: number;
   timestamp: number;
   date: string;
@@ -254,6 +287,7 @@ interface SearchResult {
   project?: string;
 }
 ```
+**Breaking change note:** The existing `path` field (currently set to `row.id` in `rowToSearchResult`) is kept as a deprecated alias. New code should use `id`. The `path` field will be removed in a future version.
 
 ---
 
@@ -619,7 +653,7 @@ Add optional `?source=journal|chat` parameter:
 
 ### `/admin/backfill-fts` — new
 
-Backfill FTS tables for entries that predate FTS setup. Reads all rows from `entries`, inserts into `entries_fts`.
+Backfill FTS tables for both entries and exchanges. Clears existing FTS data first (idempotent), then reads all rows from `entries` and `exchanges`, inserting into their respective FTS tables. See Phase 1.2 for implementation code.
 
 ---
 
