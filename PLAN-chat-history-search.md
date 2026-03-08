@@ -967,3 +967,84 @@ Incorporating fixes and removing redundancy:
 12. **Phase 4.2-4.4** — Claude Code skills (journal, reflect, sync)
 13. **Phase 4.9** — Plugin packaging + marketplace submission
 14. **Phase 4.5** — SessionStart hook for auto-sync
+
+---
+
+## Second Review Findings
+
+Issues found after the first review corrections were applied:
+
+### Unresolved Corrections
+
+**U1. C1 fallback never designed — FTS5 failure has no concrete plan B**
+
+The correction says "design a fallback using LIKE/INSTR" but the main plan body (Phase 1.2) still only shows the FTS5 schema. If FTS5 fails on D1, implementation is blocked. **Concrete fallback:** Use `SELECT id FROM entries WHERE content LIKE '%' || ? || '%' ORDER BY timestamp DESC LIMIT ?` on the existing `content` column. No new tables needed. Ranking is by recency not relevance, which is acceptable for a fallback. The trade-off (no BM25 scoring) is documented.
+
+**U2. C3 migration is infeasible — can't re-read vectors from Vectorize**
+
+The correction says "re-upsert all existing journal vectors with `source: 'journal'`" but Vectorize doesn't return vector values on read (`getByIds` returns metadata only). You'd need to regenerate embeddings from D1 content, which costs Workers AI calls for every existing entry. **Resolution:** Drop the migration. Adopt the convention: missing `source` metadata = `'journal'`. Only new entries and exchanges get explicit `source` metadata. Filter in code after Vectorize query if needed.
+
+**U3. C4 has wrong token limit — bge-m3 supports 8192 tokens, not 512**
+
+The correction states "bge-m3 has a 512-token limit (~1500-2000 chars)" and truncates to 1500 chars. This is incorrect — `@cf/baai/bge-m3` supports 8,192 tokens (~24,000 chars). The 512-token limit applies to older models like `bge-small-en-v1.5`. **Resolution:** Truncate to 6,000 characters (conservative estimate for 8K tokens). This covers the vast majority of chat exchanges without aggressive truncation.
+
+**U4. I7 topK ceiling — Vectorize allows topK up to 1000 without metadata**
+
+The correction says "use topK=100" but doesn't mention that this requires `returnMetadata: 'none'` (current code uses `returnMetadata: true` which caps topK at 50). **Resolution:** For multi-concept search, query with `returnMetadata: 'none'` and `topK: 200` per concept, then fetch entry metadata from D1 after intersection.
+
+### Plan Body vs Corrections Inconsistencies
+
+**S1. Phase 3 body still describes standalone sync/ package**
+
+Lines 195-411 describe a full `sync/` directory with its own `cli.ts`, `parse.ts`, `push.ts`, etc. Correction I1 says "skip the standalone sync package." An implementer reading top-to-bottom will build the wrong thing. **Resolution:** Phase 3 body should be rewritten as "sync logic design" — specifying the parsing algorithm and push protocol without a standalone package. The implementation lives in `cli/src/commands/sync.ts` (Phase 4).
+
+**S2. Phase 2.2 body still describes MCP ingest tool**
+
+Lines 116-158 define `ingest_chat_exchanges` as an MCP tool with full schema. Correction I2 says "drop the MCP tool." **Resolution:** Remove the MCP tool section. Phase 2.2 should describe only the HTTP import endpoint (currently in Phase 3.6).
+
+**S3. File Change Summary is stale**
+
+Line 427 lists `src/tools/ingest-exchanges.ts` as a new file (dropped by I2). The `sync/` directory files (lines 432-438) should be under `cli/` per I1. `src/embeddings.ts` is listed as "No changes" but needs truncation logic (U3).
+
+**S4. Phase 1.2 body still uses `content_rowid=rowid`**
+
+Line 41 shows `content_rowid=rowid` which C2 corrected. The body was never updated.
+
+**S5. Phase 1.1 body still suggests string-based Vectorize date filtering**
+
+Line 26 says "verify this works with ISO date strings" — I3 already resolved this: use numeric `timestamp`, not string `date`.
+
+### New Issues
+
+**N1. Existing bug: OAuth refresh token never persists (src/oauth.ts:353-355)**
+
+The refresh token code path calls `env.DB.prepare(...).bind(...)` but never calls `.run()`. New access tokens from refresh are silently not saved. This is a live bug. Not plan-related, but should be fixed.
+
+**N2. No transactional rollback for batch import failures**
+
+If embedding generation fails mid-batch (e.g., Workers AI quota), already-inserted D1 rows become orphaned (no matching Vectorize vector). D1 supports `batch()` for atomic multi-statement execution but not across D1+Vectorize. **Resolution:** Process each exchange as an atomic unit: D1 insert + Vectorize upsert. If Vectorize fails, delete the D1 row. Or use a `status` column (`pending` → `indexed`) and only mark `indexed` after Vectorize upsert succeeds.
+
+**N3. REST endpoints (4.10) need shared handler refactoring**
+
+Both MCP and REST call the same functions but wrap results differently. The plan should note that `handleSearch`, `handleProcessThoughts`, etc. are the shared layer, with MCP and REST as thin wrappers. No new abstraction needed — just document that `src/tools/*.ts` functions return raw objects, MCP wraps in `{ content: [{ type: 'text', text: JSON.stringify(result) }] }`, and REST returns as-is.
+
+**N4. `handleReadEntry` returns error objects instead of throwing**
+
+This means MCP reports "not found" as a successful response with error text in content, rather than a JSON-RPC error. This is arguably fine (the LLM sees the error message) but differs from `handleSearch` which throws. When adding exchange support to `read_journal_entry`, keep the return-error pattern consistent.
+
+**N5. Skill pattern `Bash(journal*)` matches `journalctl` and other system commands**
+
+M4's fix (`Bash(journal*)` without space) would match `journalctl`, `journald`, etc. Keep the original `Bash(journal *)` pattern (requires space after "journal") and accept that bare `journal` (no args) won't match.
+
+**N6. M7 is now partially resolved — 71 unit tests added**
+
+Test coverage added: db.ts, embeddings.ts, auth.ts, mcp.ts, index.ts, and all 4 tools. Integration and e2e tests still needed for future phases.
+
+### Summary Table
+
+| Category | Count | Status |
+|----------|-------|--------|
+| Corrections not fully resolved | 4 | U1-U4 need fixes |
+| Body/corrections inconsistent | 5 | S1-S5 need body rewrite |
+| New issues | 6 | N1-N6 identified |
+| Total first-review items resolved | 14/20 | 70% clean |
