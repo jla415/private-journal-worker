@@ -12,8 +12,8 @@ export interface Exchange {
   timestamp: number;
 }
 
-interface ContentBlock {
-  type: string;
+export interface ContentBlock {
+  type: 'text' | 'thinking' | 'tool_use' | 'tool_result';
   text?: string;
   thinking?: string;
   name?: string;
@@ -22,14 +22,14 @@ interface ContentBlock {
 }
 
 interface ConversationRecord {
-  type: string;
+  type: 'user' | 'assistant';
   uuid: string;
   parentUuid: string;
   sessionId: string;
   timestamp: string;
   cwd: string;
   message?: {
-    role: string;
+    role: 'user' | 'assistant';
     content: string | ContentBlock[];
   };
   toolUseResult?: unknown;
@@ -89,7 +89,8 @@ export function parseJSONL(content: string): Exchange[] {
   const exchanges: Exchange[] = [];
 
   for (const userRec of realUserMessages) {
-    const userMessage = userRec.message!.content as string;
+    // Filter guarantees message exists and content is string
+    const userMessage = String(userRec.message!.content);
     const allTextBlocks: string[] = [];
     const allToolNames: string[] = [];
     const toolNamesSeen = new Set<string>();
@@ -108,7 +109,8 @@ export function parseJSONL(content: string): Exchange[] {
         visited.add(child.uuid);
 
         if (child.type === 'assistant' && child.message?.role === 'assistant') {
-          const blocks = child.message.content as ContentBlock[];
+          if (typeof child.message.content === 'string') continue;
+          const blocks = child.message.content;
           const text = extractTextContent(blocks);
           if (text) allTextBlocks.push(text);
 

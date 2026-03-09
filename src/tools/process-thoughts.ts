@@ -6,10 +6,10 @@ import { insertEntry, insertEntryFts } from '../db';
 import { generateEmbedding, extractSearchableText } from '../embeddings';
 
 export async function handleProcessThoughts(
-  args: Record<string, unknown>,
+  args: ProcessThoughtsParams,
   env: Env
 ): Promise<{ success: boolean; id: string }> {
-  const params = args as ProcessThoughtsParams;
+  const params = args;
 
   // Build content from provided sections
   const sections: string[] = [];

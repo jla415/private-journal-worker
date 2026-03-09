@@ -1,7 +1,7 @@
 // ABOUTME: MCP server setup using Cloudflare's agents SDK
 // ABOUTME: Registers journal tools and handles MCP protocol
 
-import { Env } from './types';
+import { Env, ProcessThoughtsParams, ListRecentParams } from './types';
 import { AuthResult, hasScope } from './auth';
 import { SCOPE_READ, SCOPE_WRITE } from './scopes';
 import { handleProcessThoughts } from './tools/process-thoughts';
@@ -241,7 +241,7 @@ export async function handleMcp(request: Request, env: Env, authResult: AuthResu
 
         switch (toolName) {
           case 'process_thoughts':
-            result = await handleProcessThoughts(args, env);
+            result = await handleProcessThoughts(args as ProcessThoughtsParams, env);
             break;
           case 'search_journal':
             result = await handleSearch(args, env);
@@ -250,10 +250,10 @@ export async function handleMcp(request: Request, env: Env, authResult: AuthResu
             result = await handleReadEntry(args, env);
             break;
           case 'list_recent_entries':
-            result = await handleListRecent(args, env);
+            result = await handleListRecent(args as ListRecentParams, env);
             break;
           case 'journal_stats':
-            result = await handleStats(args, env);
+            result = await handleStats({}, env);
             break;
           default:
             response.error = { code: -32601, message: `Unknown tool: ${toolName}` };

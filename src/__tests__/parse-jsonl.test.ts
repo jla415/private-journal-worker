@@ -2,7 +2,7 @@
 // ABOUTME: RED tests written first per TDD approach
 
 import { describe, it, expect } from 'vitest';
-import { parseJSONL, extractTextContent, extractToolNames } from '../sync/parse-jsonl';
+import { parseJSONL, extractTextContent, extractToolNames, ContentBlock } from '../sync/parse-jsonl';
 
 function makeRecord(overrides: Record<string, unknown>) {
   return {
@@ -194,7 +194,7 @@ describe('parseJSONL', () => {
 
 describe('extractTextContent', () => {
   it('should extract text blocks only', () => {
-    const blocks = [
+    const blocks: ContentBlock[] = [
       { type: 'thinking', thinking: 'hmm' },
       { type: 'text', text: 'hello ' },
       { type: 'tool_use', id: 't1', name: 'Read', input: {} },
@@ -204,7 +204,7 @@ describe('extractTextContent', () => {
   });
 
   it('should return empty string for no text blocks', () => {
-    const blocks = [
+    const blocks: ContentBlock[] = [
       { type: 'thinking', thinking: 'hmm' },
       { type: 'tool_use', id: 't1', name: 'Bash', input: {} },
     ];
@@ -214,7 +214,7 @@ describe('extractTextContent', () => {
 
 describe('extractToolNames', () => {
   it('should collect unique tool names', () => {
-    const blocks = [
+    const blocks: ContentBlock[] = [
       { type: 'tool_use', id: 't1', name: 'Read', input: {} },
       { type: 'text', text: 'some text' },
       { type: 'tool_use', id: 't2', name: 'Bash', input: {} },
@@ -224,7 +224,7 @@ describe('extractToolNames', () => {
   });
 
   it('should return empty array when no tools used', () => {
-    const blocks = [{ type: 'text', text: 'hello' }];
+    const blocks: ContentBlock[] = [{ type: 'text', text: 'hello' }];
     expect(extractToolNames(blocks)).toEqual([]);
   });
 });

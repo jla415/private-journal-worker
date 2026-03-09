@@ -11,7 +11,7 @@ interface StatsResult {
 }
 
 export async function handleStats(
-  _args: Record<string, unknown>,
+  _args: Record<string, never>,
   env: Env
 ): Promise<StatsResult> {
   const [entryCount, exchangeCount, entryProjects, exchangeProjects, dateRange] =

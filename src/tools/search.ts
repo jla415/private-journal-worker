@@ -27,7 +27,7 @@ export async function handleSearch(
   const params: SearchParams = {
     query,
     limit: typeof args['limit'] === 'number' ? args['limit'] : undefined,
-    sections: Array.isArray(args['sections']) ? (args['sections'] as string[]) : undefined,
+    sections: Array.isArray(args['sections']) ? args['sections'].filter((s): s is string => typeof s === 'string') : undefined,
     project: typeof args['project'] === 'string' ? args['project'] : undefined,
     after: typeof args['after'] === 'string' ? args['after'] : undefined,
     before: typeof args['before'] === 'string' ? args['before'] : undefined,
@@ -45,7 +45,8 @@ export async function handleSearch(
     return multiConceptSearch(env, concepts, limit, params, source);
   }
 
-  const queryStr = params.query as string;
+  // After the Array.isArray check above, query is narrowed to string
+  const queryStr = params.query;
 
   if (mode === 'vector') {
     return vectorSearch(env, queryStr, limit, params, source);
@@ -63,18 +64,23 @@ async function vectorSearch(
   query: string,
   limit: number,
   params: SearchParams,
-  source: string
+  source: 'journal' | 'chat' | 'all'
 ): Promise<{ results: SearchResult[] }> {
   const queryEmbedding = await generateEmbedding(env, query);
 
   // Build metadata filter for date range
   const filter: VectorizeVectorMetadataFilter = {};
-  if (params.after) filter.timestamp = { $gte: new Date(params.after).getTime() };
+  const tsFilter: { $gte?: number; $lte?: number } = {};
+  if (params.after) {
+    tsFilter.$gte = new Date(params.after).getTime();
+  }
   if (params.before) {
-    const beforeTs = params.before.includes('T')
+    tsFilter.$lte = params.before.includes('T')
       ? new Date(params.before).getTime()
       : new Date(params.before + 'T23:59:59.999Z').getTime();
-    filter.timestamp = { ...((filter.timestamp as object) || {}), $lte: beforeTs };
+  }
+  if (tsFilter.$gte !== undefined || tsFilter.$lte !== undefined) {
+    filter.timestamp = tsFilter;
   }
 
   const hasFilter = Object.keys(filter).length > 0;
@@ -93,9 +99,10 @@ async function vectorSearch(
   if (params.sections && params.sections.length > 0) {
     const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, '_');
     filteredMatches = vectorResults.matches.filter((match) => {
-      const metadata = match.metadata as { sections?: string } | undefined;
-      if (!metadata || !metadata.sections) return false;
-      const entrySections = metadata.sections.split(',').map(normalize);
+      if (!match.metadata) return false;
+      const sections = match.metadata['sections'];
+      if (typeof sections !== 'string') return false;
+      const entrySections = sections.split(',').map(normalize);
       return params.sections!.some((s) => entrySections.includes(normalize(s)));
     });
   }
@@ -119,7 +126,7 @@ async function textSearch(
   query: string,
   limit: number,
   params: SearchParams,
-  source: string
+  source: 'journal' | 'chat' | 'all'
 ): Promise<{ results: SearchResult[] }> {
   const idsWithScores: { id: string; score: number }[] = [];
 
@@ -156,7 +163,7 @@ async function hybridSearch(
   query: string,
   limit: number,
   params: SearchParams,
-  source: string
+  source: 'journal' | 'chat' | 'all'
 ): Promise<{ results: SearchResult[] }> {
   // Run vector and text search in parallel
   const [vectorResult, textResult] = await Promise.all([
@@ -210,7 +217,7 @@ async function multiConceptSearch(
   concepts: string[],
   limit: number,
   params: SearchParams,
-  source: string
+  source: 'journal' | 'chat' | 'all'
 ): Promise<{ results: SearchResult[] }> {
   // Generate embeddings for all concepts in parallel
   const embeddings = await generateEmbeddings(env, concepts);
@@ -285,7 +292,7 @@ async function fetchAndMergeResults(
   env: Env,
   idsWithScores: { id: string; score: number }[],
   project: string | undefined,
-  source: string
+  source: 'journal' | 'chat' | 'all'
 ): Promise<{ results: SearchResult[] }> {
   // Split IDs by type (exc- prefix = exchange, otherwise = journal entry)
   const entryIds: string[] = [];

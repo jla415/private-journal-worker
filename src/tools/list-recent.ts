@@ -5,10 +5,10 @@ import { Env, ListRecentParams, SearchResult } from '../types';
 import { listRecentEntries, listRecentExchanges, rowToSearchResult, exchangeToSearchResult } from '../db';
 
 export async function handleListRecent(
-  args: Record<string, unknown>,
+  args: ListRecentParams,
   env: Env
 ): Promise<{ entries: SearchResult[] }> {
-  const params = args as ListRecentParams;
+  const params = args;
   const limit = params.limit || 10;
   const days = params.days || 30;
   const source = params.source || 'all';

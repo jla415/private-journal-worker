@@ -6,6 +6,7 @@ import { handleMcp } from './mcp';
 import { handleOAuthMetadata, handleAuthorize, handleToken, handleRegister } from './oauth';
 import { validateAuth, hasScope } from './auth';
 import { SCOPE_READ, SCOPE_WRITE } from './scopes';
+import { ProcessThoughtsParams, ListRecentParams } from './types';
 import { handleSearch } from './tools/search';
 import { handleReadEntry } from './tools/read-entry';
 import { handleListRecent } from './tools/list-recent';
@@ -122,13 +123,13 @@ export default {
         if (!hasScope(authResult, SCOPE_READ)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
-        const args: Record<string, unknown> = {};
-        if (url.searchParams.has('limit')) args.limit = Number(url.searchParams.get('limit'));
-        if (url.searchParams.has('days')) args.days = Number(url.searchParams.get('days'));
-        if (url.searchParams.has('project')) args.project = url.searchParams.get('project');
-        if (url.searchParams.has('source')) args.source = url.searchParams.get('source');
+        const listArgs: ListRecentParams = {};
+        if (url.searchParams.has('limit')) listArgs.limit = Number(url.searchParams.get('limit'));
+        if (url.searchParams.has('days')) listArgs.days = Number(url.searchParams.get('days'));
+        if (url.searchParams.has('project')) listArgs.project = url.searchParams.get('project')!;
+        if (url.searchParams.has('source')) listArgs.source = url.searchParams.get('source') as ListRecentParams['source'];
 
-        const result = await handleListRecent(args, env);
+        const result = await handleListRecent(listArgs, env);
         return jsonOk(result);
       }
 
@@ -146,7 +147,7 @@ export default {
         if (!hasScope(authResult, SCOPE_WRITE)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
-        const body = await request.json() as Record<string, unknown>;
+        const body = await request.json() as ProcessThoughtsParams;
         const result = await handleProcessThoughts(body, env);
         return jsonOk(result, 201);
       }
