@@ -2,14 +2,8 @@
 // ABOUTME: Implements metadata, DCR, authorize, and token endpoints
 
 import { Env, OAuthClientRow, OAuthCodeRow } from './types';
-
-function timingSafeCompare(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const bufA = encoder.encode(a);
-  const bufB = encoder.encode(b);
-  if (bufA.byteLength !== bufB.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(bufA, bufB);
-}
+import { timingSafeCompare } from './crypto';
+import { SCOPES_SUPPORTED } from './scopes';
 
 // Generate cryptographically secure random string
 function generateToken(length: number = 32): string {
@@ -76,7 +70,7 @@ export function handleOAuthMetadata(request: Request, env: Env): Response {
     authorization_endpoint: `${baseUrl}/authorize`,
     token_endpoint: `${baseUrl}/token`,
     registration_endpoint: `${baseUrl}/register`,
-    scopes_supported: ['journal:read', 'journal:write'],
+    scopes_supported: SCOPES_SUPPORTED,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],

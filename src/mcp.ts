@@ -3,6 +3,7 @@
 
 import { Env } from './types';
 import { AuthResult, hasScope } from './auth';
+import { SCOPE_READ, SCOPE_WRITE } from './scopes';
 import { handleProcessThoughts } from './tools/process-thoughts';
 import { handleSearch } from './tools/search';
 import { handleReadEntry } from './tools/read-entry';
@@ -26,11 +27,11 @@ interface McpResponse {
 
 // Scope required per tool
 const TOOL_SCOPES: Record<string, string> = {
-  process_thoughts: 'journal:write',
-  search_journal: 'journal:read',
-  read_journal_entry: 'journal:read',
-  list_recent_entries: 'journal:read',
-  journal_stats: 'journal:read',
+  process_thoughts: SCOPE_WRITE,
+  search_journal: SCOPE_READ,
+  read_journal_entry: SCOPE_READ,
+  list_recent_entries: SCOPE_READ,
+  journal_stats: SCOPE_READ,
 };
 
 const TOOLS = {

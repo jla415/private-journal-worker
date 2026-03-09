@@ -2,38 +2,32 @@
 // ABOUTME: Checks both static JOURNAL_TOKEN and OAuth tokens in D1
 
 import { Env, OAuthTokenRow } from './types';
+import { timingSafeCompare } from './crypto';
+import { SCOPE_ALL } from './scopes';
 
 export interface AuthResult {
   valid: boolean;
   clientId?: string;
   scope?: string;
+  scopes: string[];
   authSource?: 'static' | 'oauth';
 }
 
-function timingSafeCompare(a: string, b: string): boolean {
-  const encoder = new TextEncoder();
-  const bufA = encoder.encode(a);
-  const bufB = encoder.encode(b);
-  if (bufA.byteLength !== bufB.byteLength) return false;
-  return crypto.subtle.timingSafeEqual(bufA, bufB);
-}
-
 export function hasScope(authResult: AuthResult, requiredScope: string): boolean {
-  if (!authResult.scope) return false;
-  return authResult.scope.split(' ').includes(requiredScope);
+  return authResult.scopes.includes(requiredScope);
 }
 
 export async function validateAuth(request: Request, env: Env): Promise<AuthResult> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return { valid: false };
+    return { valid: false, scopes: [] };
   }
 
   const token = authHeader.slice(7);
 
   // Check static bearer token (for CLI)
   if (env.JOURNAL_TOKEN && timingSafeCompare(token, env.JOURNAL_TOKEN)) {
-    return { valid: true, scope: 'journal:read journal:write', authSource: 'static' };
+    return { valid: true, scope: SCOPE_ALL, scopes: SCOPE_ALL.split(' '), authSource: 'static' };
   }
 
   // Check OAuth token in D1
@@ -49,9 +43,10 @@ export async function validateAuth(request: Request, env: Env): Promise<AuthResu
       valid: true,
       clientId: result.client_id,
       scope: result.scope,
+      scopes: result.scope.split(' '),
       authSource: 'oauth',
     };
   }
 
-  return { valid: false };
+  return { valid: false, scopes: [] };
 }

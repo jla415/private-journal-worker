@@ -3,8 +3,24 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import worker from '../index';
-import { createMockEnv, createMockEntryRow } from './mocks';
+import { createMockEnv } from './mocks';
 import { Env } from '../types';
+
+// Helper: mock DB to return an OAuth token for auth validation
+function mockOAuthAuth(env: Env, scope: string) {
+  const oauthToken = {
+    client_id: 'client-1',
+    scope,
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  };
+  const stmt = {
+    bind: vi.fn().mockReturnThis(),
+    first: vi.fn().mockResolvedValue(oauthToken),
+    all: vi.fn().mockResolvedValue({ results: [] }),
+    run: vi.fn().mockResolvedValue({}),
+  };
+  (env.DB.prepare as any).mockReturnValue(stmt);
+}
 
 describe('Worker fetch handler', () => {
   let env: Env;
@@ -91,19 +107,7 @@ describe('Worker fetch handler', () => {
     });
 
     it('should reject OAuth tokens with 403', async () => {
-      // Set up mock to return an OAuth auth result
-      const oauthToken = {
-        client_id: 'client-1',
-        scope: 'journal:read journal:write',
-        expires_at: Math.floor(Date.now() / 1000) + 3600,
-      };
-      const stmt = {
-        bind: vi.fn().mockReturnThis(),
-        first: vi.fn().mockResolvedValue(oauthToken),
-        all: vi.fn().mockResolvedValue({ results: [] }),
-        run: vi.fn().mockResolvedValue({}),
-      };
-      (env.DB.prepare as any).mockReturnValue(stmt);
+      mockOAuthAuth(env, 'journal:read journal:write');
 
       const request = new Request('https://example.com/admin/clear', {
         method: 'POST',
@@ -183,17 +187,7 @@ describe('Worker fetch handler', () => {
 
   describe('REST API scope enforcement', () => {
     it('should require journal:read for GET /api/stats', async () => {
-      // OAuth token with only journal:write scope
-      const oauthToken = {
-        client_id: 'client-1',
-        scope: 'journal:write',
-        expires_at: Math.floor(Date.now() / 1000) + 3600,
-      };
-      const stmt = {
-        bind: vi.fn().mockReturnThis(),
-        first: vi.fn().mockResolvedValue(oauthToken),
-      };
-      (env.DB.prepare as any).mockReturnValue(stmt);
+      mockOAuthAuth(env, 'journal:write');
 
       const request = new Request('https://example.com/api/stats', {
         headers: { Authorization: 'Bearer oauth-token' },
@@ -204,17 +198,7 @@ describe('Worker fetch handler', () => {
     });
 
     it('should require journal:write for POST /api/entries', async () => {
-      // OAuth token with only journal:read scope
-      const oauthToken = {
-        client_id: 'client-1',
-        scope: 'journal:read',
-        expires_at: Math.floor(Date.now() / 1000) + 3600,
-      };
-      const stmt = {
-        bind: vi.fn().mockReturnThis(),
-        first: vi.fn().mockResolvedValue(oauthToken),
-      };
-      (env.DB.prepare as any).mockReturnValue(stmt);
+      mockOAuthAuth(env, 'journal:read');
 
       const request = new Request('https://example.com/api/entries', {
         method: 'POST',
@@ -230,16 +214,7 @@ describe('Worker fetch handler', () => {
     });
 
     it('should require journal:write for POST /api/import', async () => {
-      const oauthToken = {
-        client_id: 'client-1',
-        scope: 'journal:read',
-        expires_at: Math.floor(Date.now() / 1000) + 3600,
-      };
-      const stmt = {
-        bind: vi.fn().mockReturnThis(),
-        first: vi.fn().mockResolvedValue(oauthToken),
-      };
-      (env.DB.prepare as any).mockReturnValue(stmt);
+      mockOAuthAuth(env, 'journal:read');
 
       const request = new Request('https://example.com/api/import', {
         method: 'POST',

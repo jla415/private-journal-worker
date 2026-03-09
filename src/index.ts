@@ -4,7 +4,8 @@
 import { Env } from './types';
 import { handleMcp } from './mcp';
 import { handleOAuthMetadata, handleAuthorize, handleToken, handleRegister } from './oauth';
-import { validateAuth, hasScope, AuthResult } from './auth';
+import { validateAuth, hasScope } from './auth';
+import { SCOPE_READ, SCOPE_WRITE } from './scopes';
 import { handleSearch } from './tools/search';
 import { handleReadEntry } from './tools/read-entry';
 import { handleListRecent } from './tools/list-recent';
@@ -99,7 +100,7 @@ export default {
       // --- REST API endpoints (scope-enforced) ---
 
       if (path === '/api/search' && request.method === 'GET') {
-        if (!hasScope(authResult, 'journal:read')) {
+        if (!hasScope(authResult, SCOPE_READ)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
         const args: Record<string, unknown> = {};
@@ -118,7 +119,7 @@ export default {
       }
 
       if (path === '/api/entries/recent' && request.method === 'GET') {
-        if (!hasScope(authResult, 'journal:read')) {
+        if (!hasScope(authResult, SCOPE_READ)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
         const args: Record<string, unknown> = {};
@@ -134,7 +135,7 @@ export default {
       // GET /api/entries/:id — must come after /api/entries/recent
       const entryMatch = path.match(/^\/api\/entries\/(.+)$/);
       if (entryMatch && request.method === 'GET') {
-        if (!hasScope(authResult, 'journal:read')) {
+        if (!hasScope(authResult, SCOPE_READ)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
         const result = await handleReadEntry({ id: decodeURIComponent(entryMatch[1]) }, env);
@@ -142,7 +143,7 @@ export default {
       }
 
       if (path === '/api/entries' && request.method === 'POST') {
-        if (!hasScope(authResult, 'journal:write')) {
+        if (!hasScope(authResult, SCOPE_WRITE)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
         const body = await request.json() as Record<string, unknown>;
@@ -151,7 +152,7 @@ export default {
       }
 
       if (path === '/api/stats' && request.method === 'GET') {
-        if (!hasScope(authResult, 'journal:read')) {
+        if (!hasScope(authResult, SCOPE_READ)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
         const result = await handleStats({}, env);
@@ -159,7 +160,7 @@ export default {
       }
 
       if ((path === '/api/import' || path === '/admin/import-conversations') && request.method === 'POST') {
-        if (!hasScope(authResult, 'journal:write')) {
+        if (!hasScope(authResult, SCOPE_WRITE)) {
           return jsonError('Forbidden: insufficient scope', 403);
         }
         return await handleImportConversations(request, env);

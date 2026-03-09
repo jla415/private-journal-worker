@@ -15,9 +15,9 @@ function mcpRequest(method: string, params?: Record<string, unknown>, id: number
   });
 }
 
-const fullAuth: AuthResult = { valid: true, scope: 'journal:read journal:write', authSource: 'static' };
-const readOnlyAuth: AuthResult = { valid: true, scope: 'journal:read', authSource: 'oauth', clientId: 'c1' };
-const writeOnlyAuth: AuthResult = { valid: true, scope: 'journal:write', authSource: 'oauth', clientId: 'c1' };
+const fullAuth: AuthResult = { valid: true, scope: 'journal:read journal:write', scopes: ['journal:read', 'journal:write'], authSource: 'static' };
+const readOnlyAuth: AuthResult = { valid: true, scope: 'journal:read', scopes: ['journal:read'], authSource: 'oauth', clientId: 'c1' };
+const writeOnlyAuth: AuthResult = { valid: true, scope: 'journal:write', scopes: ['journal:write'], authSource: 'oauth', clientId: 'c1' };
 
 describe('handleMcp', () => {
   let env: Env;
