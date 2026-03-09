@@ -149,7 +149,7 @@ const TOOLS = {
           description: 'Filter by source: journal entries, chat exchanges, or all (default)',
         },
       },
-      required: [],
+      required: ['id'],
     },
   },
   journal_stats: {

@@ -171,16 +171,18 @@ describe('Integration: Chat history import and retrieval', () => {
     expect(body.skipped).toBe(0);
     expect(body.errors).toEqual([]);
 
-    // Verify embeddings were generated for each exchange
-    expect(env.AI.run).toHaveBeenCalledTimes(2);
-    // Verify Vectorize upserts with chat source
-    expect(env.VECTORIZE.upsert).toHaveBeenCalledTimes(2);
-    expect(env.VECTORIZE.upsert).toHaveBeenCalledWith([
-      expect.objectContaining({
-        id: expect.stringMatching(/^exc-/),
-        metadata: expect.objectContaining({ source: 'chat' }),
-      }),
-    ]);
+    // Verify embeddings were generated in a single batch call
+    expect(env.AI.run).toHaveBeenCalledTimes(1);
+    // Verify Vectorize batch upsert with chat source
+    expect(env.VECTORIZE.upsert).toHaveBeenCalledTimes(1);
+    expect(env.VECTORIZE.upsert).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: expect.stringMatching(/^exc-/),
+          metadata: expect.objectContaining({ source: 'chat' }),
+        }),
+      ])
+    );
   });
 
   it('should skip duplicate exchanges on re-import', async () => {
@@ -257,13 +259,10 @@ describe('Integration: Chat history import and retrieval', () => {
     expect(body.content).toContain('Use JSON.parse()');
   });
 
-  it('should rollback D1 insert when Vectorize upsert fails', async () => {
-    const deleteSpy = vi.fn().mockResolvedValue({});
-    (env.DB.prepare as any).mockImplementation((sql: string) => ({
+  it('should report error when Vectorize upsert fails in embedding phase', async () => {
+    (env.DB.prepare as any).mockImplementation(() => ({
       bind: vi.fn().mockReturnThis(),
-      run: sql.startsWith('DELETE')
-        ? deleteSpy
-        : vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
+      run: vi.fn().mockResolvedValue({ meta: { changes: 1 } }),
       first: vi.fn().mockResolvedValue(null),
       all: vi.fn().mockResolvedValue({ results: [] }),
     }));
@@ -287,11 +286,10 @@ describe('Integration: Chat history import and retrieval', () => {
     const response = await worker.fetch(request, env);
     const body = (await response.json()) as any;
 
-    expect(body.imported).toBe(0);
+    // D1/FTS insert succeeds (imported=1), but embedding phase fails
+    expect(body.imported).toBe(1);
     expect(body.errors).toHaveLength(1);
     expect(body.errors[0].error).toContain('Vectorize unavailable');
-    // Verify rollback DELETE was called
-    expect(deleteSpy).toHaveBeenCalled();
   });
 });
 

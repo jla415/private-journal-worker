@@ -220,7 +220,7 @@ async function multiConceptSearch(
     embeddings.map((embedding) =>
       env.VECTORIZE.query(embedding, {
         topK: Math.min(limit * 10, 200),
-        returnMetadata: false as unknown as 'none',
+        returnMetadata: false,
       })
     )
   );

@@ -62,12 +62,8 @@ export async function listRecentEntries(
   const params: (string | number)[] = [cutoffTimestamp];
 
   if (options.project !== undefined) {
-    if (options.project === null || options.project === '') {
-      query += ' AND project IS NULL';
-    } else {
-      query += ' AND project = ?';
-      params.push(options.project);
-    }
+    query += ' AND project = ?';
+    params.push(options.project);
   }
 
   query += ' ORDER BY timestamp DESC LIMIT ?';
@@ -92,29 +88,27 @@ export async function insertEntryFts(
     .run();
 }
 
+// Strip FTS5 operators to prevent syntax errors from user input
+function sanitizeFtsQuery(query: string): string {
+  return query
+    .replace(/[*+\-"^():]/g, ' ')
+    .replace(/\b(AND|OR|NOT|NEAR)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export async function searchEntryFts(
   env: Env,
   query: string,
   limit: number
 ): Promise<{ id: string; rank: number }[]> {
+  const sanitized = sanitizeFtsQuery(query);
+  if (!sanitized) return [];
   const result = await env.DB.prepare(
     'SELECT id, rank FROM entries_fts WHERE entries_fts MATCH ? ORDER BY rank LIMIT ?'
   )
-    .bind(query, limit)
+    .bind(sanitized, limit)
     .all<{ id: string; rank: number }>();
-  return result.results;
-}
-
-export async function searchEntryFallback(
-  env: Env,
-  query: string,
-  limit: number
-): Promise<{ id: string }[]> {
-  const result = await env.DB.prepare(
-    "SELECT id FROM entries WHERE content LIKE '%' || ? || '%' ORDER BY timestamp DESC LIMIT ?"
-  )
-    .bind(query, limit)
-    .all<{ id: string }>();
   return result.results;
 }
 
@@ -204,10 +198,12 @@ export async function searchExchangeFts(
   query: string,
   limit: number
 ): Promise<{ id: string; rank: number }[]> {
+  const sanitized = sanitizeFtsQuery(query);
+  if (!sanitized) return [];
   const result = await env.DB.prepare(
     'SELECT id, rank FROM exchanges_fts WHERE exchanges_fts MATCH ? ORDER BY rank LIMIT ?'
   )
-    .bind(query, limit)
+    .bind(sanitized, limit)
     .all<{ id: string; rank: number }>();
   return result.results;
 }
@@ -222,12 +218,8 @@ export async function listRecentExchanges(
   const params: (string | number)[] = [cutoffTimestamp];
 
   if (options.project !== undefined) {
-    if (options.project === null || options.project === '') {
-      query += ' AND project IS NULL';
-    } else {
-      query += ' AND project = ?';
-      params.push(options.project);
-    }
+    query += ' AND project = ?';
+    params.push(options.project);
   }
 
   query += ' ORDER BY timestamp DESC LIMIT ?';

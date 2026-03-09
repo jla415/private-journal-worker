@@ -6,11 +6,18 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.cli.json --noEmit",
+    "sync": "tsx src/sync/cli.ts",
+    "sync:dry-run": "tsx src/sync/cli.ts --dry-run",
+    "build:cli": "tsc -p tsconfig.cli.json"
+  },
+  "bin": {
+    "journal-sync": "dist/sync/cli.js"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240512.0",
     "@types/node": "^25.0.6",
+    "tsx": "^4.21.0",
     "typescript": "^5.4.5",
     "vitest": "^1.6.0",
     "wrangler": "^3.71.0"

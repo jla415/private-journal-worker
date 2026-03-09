@@ -15,7 +15,7 @@ import {
   insertEntryFts,
   insertExchangeFts,
 } from './db';
-import { generateEmbedding, extractExchangeText } from './embeddings';
+import { generateEmbeddings, extractExchangeText } from './embeddings';
 
 function jsonError(error: string, status: number): Response {
   return new Response(JSON.stringify({ error }), {
@@ -101,10 +101,6 @@ export default {
         if (url.searchParams.has('sections')) args.sections = url.searchParams.get('sections')!.split(',');
 
         const result = await handleSearch(args, env);
-        const offset = Number(url.searchParams.get('offset') ?? 0);
-        if (offset > 0) {
-          result.results = result.results.slice(offset);
-        }
         return jsonOk(result);
       }
 
@@ -177,9 +173,16 @@ async function handleImportConversations(request: Request, env: Env): Promise<Re
     return jsonError('exchanges array is required', 400);
   }
 
+  if (body.exchanges.length > 100) {
+    return jsonError('Maximum 100 exchanges per request', 400);
+  }
+
   let imported = 0;
   let skipped = 0;
   const errors: { index: number; error: string }[] = [];
+
+  // Phase 1: Insert into D1 + FTS, collect newly inserted for embedding
+  const newlyInserted: { id: string; searchText: string; timestamp: number; date: string; session_id: string }[] = [];
 
   for (let i = 0; i < body.exchanges.length; i++) {
     const exc = body.exchanges[i];
@@ -200,7 +203,6 @@ async function handleImportConversations(request: Request, env: Env): Promise<Re
 
       const toolNamesStr = exc.tool_names?.join(',') ?? null;
 
-      // Insert into D1 (returns false if already exists)
       const wasInserted = await insertExchange(env, {
         id,
         session_id: exc.session_id ?? null,
@@ -217,32 +219,41 @@ async function handleImportConversations(request: Request, env: Env): Promise<Re
         continue;
       }
 
-      // Generate embedding and upsert to Vectorize
-      try {
-        const searchText = extractExchangeText(exc.user_message, exc.assistant_message);
-        const embedding = await generateEmbedding(env, searchText);
-
-        await env.VECTORIZE.upsert([{
-          id,
-          values: embedding,
-          metadata: {
-            timestamp: now,
-            date,
-            source: 'chat',
-            session_id: exc.session_id ?? '',
-          },
-        }]);
-      } catch (vecErr) {
-        // Rollback D1 insert if Vectorize fails
-        await env.DB.prepare('DELETE FROM exchanges WHERE id = ?').bind(id).run();
-        await env.DB.prepare('DELETE FROM exchanges_fts WHERE id = ?').bind(id).run();
-        throw vecErr;
-      }
-
+      newlyInserted.push({
+        id,
+        searchText: extractExchangeText(exc.user_message, exc.assistant_message),
+        timestamp: now,
+        date,
+        session_id: exc.session_id ?? '',
+      });
       imported++;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       errors.push({ index: i, error: message });
+    }
+  }
+
+  // Phase 2: Batch-generate embeddings and upsert to Vectorize
+  if (newlyInserted.length > 0) {
+    try {
+      const texts = newlyInserted.map((item) => item.searchText);
+      const embeddings = await generateEmbeddings(env, texts);
+
+      const vectors = newlyInserted.map((item, idx) => ({
+        id: item.id,
+        values: embeddings[idx],
+        metadata: {
+          timestamp: item.timestamp,
+          date: item.date,
+          source: 'chat',
+          session_id: item.session_id,
+        },
+      }));
+
+      await env.VECTORIZE.upsert(vectors);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      errors.push({ index: -1, error: `Embedding phase failed: ${message}` });
     }
   }
 

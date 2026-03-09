@@ -135,7 +135,7 @@ describe('db', () => {
       );
     });
 
-    it('should handle null/empty project filter', async () => {
+    it('should filter by empty string project literally', async () => {
       const stmt = {
         bind: vi.fn().mockReturnThis(),
         all: vi.fn().mockResolvedValue({ results: [] }),
@@ -145,7 +145,7 @@ describe('db', () => {
       await listRecentEntries(env, { limit: 10, days: 30, project: '' });
 
       expect(env.DB.prepare).toHaveBeenCalledWith(
-        'SELECT * FROM entries WHERE timestamp > ? AND project IS NULL ORDER BY timestamp DESC LIMIT ?'
+        'SELECT * FROM entries WHERE timestamp > ? AND project = ? ORDER BY timestamp DESC LIMIT ?'
       );
     });
   });
