@@ -43,14 +43,14 @@ vi.mock('node:fs', async (importOriginal) => {
 import { readdirSync } from 'node:fs';
 
 describe('sync', () => {
-  let fetchMock: typeof fetch;
+  let fetchMock: ReturnType<typeof vi.fn> & typeof fetch;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    fetchMock = vi.fn<typeof fetch>().mockResolvedValue({
+    fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ imported: 2, skipped: 0, errors: [] }),
-    } as Response);
+    } as Response) as ReturnType<typeof vi.fn> & typeof fetch;
   });
 
   function makeOptions(overrides: Partial<SyncOptions> = {}): SyncOptions {

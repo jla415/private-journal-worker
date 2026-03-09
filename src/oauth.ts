@@ -3,6 +3,14 @@
 
 import { Env, OAuthClientRow, OAuthCodeRow } from './types';
 
+function timingSafeCompare(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const bufA = encoder.encode(a);
+  const bufB = encoder.encode(b);
+  if (bufA.byteLength !== bufB.byteLength) return false;
+  return crypto.subtle.timingSafeEqual(bufA, bufB);
+}
+
 // Generate cryptographically secure random string
 function generateToken(length: number = 32): string {
   const array = new Uint8Array(length);
@@ -173,7 +181,8 @@ export async function handleAuthorize(request: Request, env: Env): Promise<Respo
     const pinValue = formData.get('pin');
 
     // Type narrow: formData.get returns string | File | null
-    if (typeof pinValue !== 'string' || pinValue !== env.AUTHORIZE_PIN) {
+    // Use timing-safe comparison to prevent timing attacks on PIN
+    if (typeof pinValue !== 'string' || !timingSafeCompare(pinValue, env.AUTHORIZE_PIN)) {
       return new Response(pinFormHTML(url.search, 'Invalid PIN'), {
         status: 403,
         headers: { 'Content-Type': 'text/html' },

@@ -861,7 +861,7 @@ describe('Integration: Error resilience', () => {
 
     expect(response.status).toBe(500);
     const body = (await response.json()) as any;
-    expect(body.error).toContain('AI service unavailable');
+    expect(body.error).toBe('Internal server error');
   });
 
   it('should return 500 when D1 is unavailable', async () => {
@@ -874,7 +874,7 @@ describe('Integration: Error resilience', () => {
 
     expect(response.status).toBe(500);
     const body = (await response.json()) as any;
-    expect(body.error).toContain('D1 unavailable');
+    expect(body.error).toBe('Internal server error');
   });
 
   it('should return 500 when Vectorize query fails', async () => {
@@ -885,7 +885,7 @@ describe('Integration: Error resilience', () => {
 
     expect(response.status).toBe(500);
     const body = (await response.json()) as any;
-    expect(body.error).toContain('Vectorize timeout');
+    expect(body.error).toBe('Internal server error');
   });
 
   it('should handle malformed JSON in POST body', async () => {

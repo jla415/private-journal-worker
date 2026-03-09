@@ -27,13 +27,14 @@ describe('auth', () => {
     expect(result.valid).toBe(false);
   });
 
-  it('should accept valid static JOURNAL_TOKEN', async () => {
+  it('should accept valid static JOURNAL_TOKEN with authSource static', async () => {
     const request = new Request('https://example.com', {
       headers: { Authorization: 'Bearer test-token' },
     });
     const result = await validateAuth(request, env);
     expect(result.valid).toBe(true);
     expect(result.scope).toBe('journal:read journal:write');
+    expect(result.authSource).toBe('static');
   });
 
   it('should reject invalid static token and fall through to OAuth check', async () => {
@@ -66,5 +67,6 @@ describe('auth', () => {
     expect(result.valid).toBe(true);
     expect(result.clientId).toBe('client-1');
     expect(result.scope).toBe('journal:read');
+    expect(result.authSource).toBe('oauth');
   });
 });

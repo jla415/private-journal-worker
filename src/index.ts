@@ -4,7 +4,7 @@
 import { Env } from './types';
 import { handleMcp } from './mcp';
 import { handleOAuthMetadata, handleAuthorize, handleToken, handleRegister } from './oauth';
-import { validateAuth } from './auth';
+import { validateAuth, hasScope, AuthResult } from './auth';
 import { handleSearch } from './tools/search';
 import { handleReadEntry } from './tools/read-entry';
 import { handleListRecent } from './tools/list-recent';
@@ -37,15 +37,9 @@ export default {
       const url = new URL(request.url);
       const path = url.pathname;
 
-      // CORS headers for preflight
+      // OPTIONS preflight — no CORS headers needed (CLI/server-side MCP only)
       if (request.method === 'OPTIONS') {
-        return new Response(null, {
-          headers: {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-          },
-        });
+        return new Response(null, { status: 204 });
       }
 
       // OAuth endpoints (no auth required)
@@ -77,7 +71,7 @@ export default {
         if (!authResult.valid) {
           return jsonError('Unauthorized', 401);
         }
-        return handleMcp(request, env);
+        return handleMcp(request, env, authResult);
       }
 
       // All remaining routes require auth
@@ -86,9 +80,28 @@ export default {
         return jsonError('Unauthorized', 401);
       }
 
-      // --- REST API endpoints ---
+      // --- Admin endpoints (static token only) ---
+
+      if (path === '/admin/clear' && request.method === 'POST') {
+        if (authResult.authSource !== 'static') {
+          return jsonError('Forbidden: admin endpoints require static token', 403);
+        }
+        return await handleAdminClear(url, env);
+      }
+
+      if (path === '/admin/backfill-fts' && request.method === 'POST') {
+        if (authResult.authSource !== 'static') {
+          return jsonError('Forbidden: admin endpoints require static token', 403);
+        }
+        return await handleBackfillFts(env);
+      }
+
+      // --- REST API endpoints (scope-enforced) ---
 
       if (path === '/api/search' && request.method === 'GET') {
+        if (!hasScope(authResult, 'journal:read')) {
+          return jsonError('Forbidden: insufficient scope', 403);
+        }
         const args: Record<string, unknown> = {};
         const q = url.searchParams.get('q');
         if (q) args.query = q;
@@ -105,6 +118,9 @@ export default {
       }
 
       if (path === '/api/entries/recent' && request.method === 'GET') {
+        if (!hasScope(authResult, 'journal:read')) {
+          return jsonError('Forbidden: insufficient scope', 403);
+        }
         const args: Record<string, unknown> = {};
         if (url.searchParams.has('limit')) args.limit = Number(url.searchParams.get('limit'));
         if (url.searchParams.has('days')) args.days = Number(url.searchParams.get('days'));
@@ -118,39 +134,41 @@ export default {
       // GET /api/entries/:id — must come after /api/entries/recent
       const entryMatch = path.match(/^\/api\/entries\/(.+)$/);
       if (entryMatch && request.method === 'GET') {
+        if (!hasScope(authResult, 'journal:read')) {
+          return jsonError('Forbidden: insufficient scope', 403);
+        }
         const result = await handleReadEntry({ id: decodeURIComponent(entryMatch[1]) }, env);
         return jsonOk(result);
       }
 
       if (path === '/api/entries' && request.method === 'POST') {
+        if (!hasScope(authResult, 'journal:write')) {
+          return jsonError('Forbidden: insufficient scope', 403);
+        }
         const body = await request.json() as Record<string, unknown>;
         const result = await handleProcessThoughts(body, env);
         return jsonOk(result, 201);
       }
 
       if (path === '/api/stats' && request.method === 'GET') {
+        if (!hasScope(authResult, 'journal:read')) {
+          return jsonError('Forbidden: insufficient scope', 403);
+        }
         const result = await handleStats({}, env);
         return jsonOk(result);
       }
 
       if ((path === '/api/import' || path === '/admin/import-conversations') && request.method === 'POST') {
+        if (!hasScope(authResult, 'journal:write')) {
+          return jsonError('Forbidden: insufficient scope', 403);
+        }
         return await handleImportConversations(request, env);
-      }
-
-      // --- Admin endpoints ---
-
-      if (path === '/admin/clear' && request.method === 'POST') {
-        return await handleAdminClear(url, env);
-      }
-
-      if (path === '/admin/backfill-fts' && request.method === 'POST') {
-        return await handleBackfillFts(env);
       }
 
       return jsonError('Not Found', 404);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Internal server error';
-      return jsonError(message, 500);
+      console.error('Unhandled error:', err);
+      return jsonError('Internal server error', 500);
     }
   },
 };

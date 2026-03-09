@@ -2,6 +2,7 @@
 // ABOUTME: Registers journal tools and handles MCP protocol
 
 import { Env } from './types';
+import { AuthResult, hasScope } from './auth';
 import { handleProcessThoughts } from './tools/process-thoughts';
 import { handleSearch } from './tools/search';
 import { handleReadEntry } from './tools/read-entry';
@@ -22,6 +23,15 @@ interface McpResponse {
   result?: unknown;
   error?: { code: number; message: string };
 }
+
+// Scope required per tool
+const TOOL_SCOPES: Record<string, string> = {
+  process_thoughts: 'journal:write',
+  search_journal: 'journal:read',
+  read_journal_entry: 'journal:read',
+  list_recent_entries: 'journal:read',
+  journal_stats: 'journal:read',
+};
 
 const TOOLS = {
   process_thoughts: {
@@ -170,7 +180,7 @@ function jsonError(error: string, status: number): Response {
   });
 }
 
-export async function handleMcp(request: Request, env: Env): Promise<Response> {
+export async function handleMcp(request: Request, env: Env, authResult: AuthResult): Promise<Response> {
   if (request.method === 'GET') {
     return jsonError('Streaming not implemented', 501);
   }
@@ -217,6 +227,13 @@ export async function handleMcp(request: Request, env: Env): Promise<Response> {
       const params = body.params as { name: string; arguments: Record<string, unknown> };
       const toolName = params.name;
       const args = params.arguments;
+
+      // Check scope before dispatching
+      const requiredScope = TOOL_SCOPES[toolName];
+      if (requiredScope && !hasScope(authResult, requiredScope)) {
+        response.error = { code: -32600, message: `Insufficient scope: requires ${requiredScope}` };
+        return jsonResponse(response);
+      }
 
       try {
         let result: unknown;
